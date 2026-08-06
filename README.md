@@ -1,8 +1,20 @@
 # vscodium-for-immutable
 
-A one-click installer that runs **VSCodium** from its official `.deb` package
-on immutable Fedora hosts (Bazzite, Silverblue, Kinoite, and similar) where
-you can't install `.deb`/`.rpm` packages onto the base OS.
+One script that provisions a working development environment on immutable
+Fedora hosts (Bazzite, Silverblue, Kinoite, and similar), where you can't
+install `.deb`/`.rpm` packages onto the base OS.
+
+It installs **VSCodium** from its official `.deb` package into a Distrobox
+container, along with the tools you actually need next to an editor: **git**,
+the **GitHub CLI**, and a lint toolchain (**shellcheck**, **actionlint**,
+**jq**, **fd**, **yamllint**). The editor is then exported to the host
+application menu and launches like any native app.
+
+Because VSCodium's integrated terminal runs inside that container, everything
+the script installs is already on PATH there. That is the point of the design:
+the environment is defined by this one script, so it is reproducible and
+survives a container rebuild. If you need a new tool, add it here rather than
+installing it by hand into the container.
 
 It's a sibling to
 [claude-desktop-for-immutable](https://github.com/Kinsman4249/claude-desktop-for-immutable)
