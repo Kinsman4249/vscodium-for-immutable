@@ -50,16 +50,22 @@ extensions, no sandbox permission wrangling.
 3. Also installs **git** and the **GitHub CLI (`gh`)** inside the container,
    from GitHub's official apt repo, so VSCodium's source control and any
    terminal/agent workflows have them on PATH.
-4. Symlinks `distrobox` -> `distrobox-host-exec` at `/usr/local/bin/distrobox`
+4. Installs a small lint toolchain alongside them: **shellcheck**, **jq**,
+   **fd** (Debian names the binary `fdfind`, so a `fd` symlink is added),
+   **yamllint**, and **actionlint**. The first four come from Debian; Debian
+   has no actionlint package, so its upstream release binary is downloaded
+   and checked against a SHA-256 pinned in the script. A checksum mismatch
+   skips actionlint and leaves the rest of the install untouched.
+5. Symlinks `distrobox` -> `distrobox-host-exec` at `/usr/local/bin/distrobox`
    *inside* the container, so running `distrobox ...` from VSCodium's
    integrated terminal forwards to your real host distrobox instead of
    silently doing nothing (the container has no podman/docker of its own).
    See "Running distrobox from VSCodium's terminal" below.
-5. Exports VSCodium to the host application launcher via `distrobox-export`.
-6. Adds `--disable-gpu-compositing` to the exported launcher to work around an
+6. Exports VSCodium to the host application launcher via `distrobox-export`.
+7. Adds `--disable-gpu-compositing` to the exported launcher to work around an
    Electron GPU-process repaint bug seen on hybrid Intel+NVIDIA hardware. See
    "GPU note" below if you don't need it.
-7. Installs VSCodium's icon into the host's `hicolor` icon theme
+8. Installs VSCodium's icon into the host's `hicolor` icon theme
    (`~/.local/share/icons/hicolor/512x512/apps/vscodium.png`) and points the
    launcher's `Icon=` at it by name, so it shows up correctly in both the
    app grid/start menu and the taskbar/dock (an earlier version pointed
@@ -69,8 +75,9 @@ extensions, no sandbox permission wrangling.
 
 - An immutable (or any) Fedora host with **Distrobox** and a container backend
   (podman or docker) installed.
-- Network access to `download.vscodium.com`, `gitlab.com`, and
-  `cli.github.com`.
+- Network access to `download.vscodium.com`, `gitlab.com`,
+  `cli.github.com`, and `github.com` (the last one for the actionlint
+  release binary).
 
 ## Usage
 
@@ -81,7 +88,9 @@ extensions, no sandbox permission wrangling.
 ./install-vscodium.sh --help     # show help
 ```
 
-Re-running the installer updates VSCodium (and git/gh) in place.
+Re-running the installer updates VSCodium (and git/gh, and the lint
+toolchain) in place. actionlint is skipped on a re-run if the pinned version
+is already installed, so repeat runs stay cheap.
 
 ## Running distrobox from VSCodium's terminal
 
@@ -110,11 +119,26 @@ run).
 
 ## Testing changes
 
-After editing `install-vscodium.sh`, at minimum run `bash -n
-install-vscodium.sh` to syntax-check it, then do a full `./install-vscodium.sh`
-and confirm VSCodium launches from the app grid, its integrated terminal has
-`git` and `gh`, and `./install-vscodium.sh --remove` tears everything down
-cleanly.
+After editing `install-vscodium.sh`, run both checks - the installer provides
+shellcheck itself, so there is no excuse to skip it:
+
+```bash
+bash -n install-vscodium.sh    # syntax
+shellcheck install-vscodium.sh # correctness
+```
+
+Then do a full `./install-vscodium.sh` and confirm VSCodium launches from the
+app grid, its integrated terminal has `git`, `gh`, and `actionlint`, and
+`./install-vscodium.sh --remove` tears everything down cleanly.
+
+Note that the toolchain lives inside the inner heredoc that runs in the
+container, so `shellcheck` on the outer file does not see it. To check that
+part, extract it first:
+
+```bash
+awk '/^  cat > "\$out" <<.INNER.$/{f=1;next} /^INNER$/{f=0} f' \
+  install-vscodium.sh | shellcheck -s bash -
+```
 
 ## License
 

@@ -139,9 +139,68 @@ if [ ! -f /etc/apt/sources.list.d/github-cli.list ]; then
     | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
 fi
 
-echo "Installing/updating VSCodium and gh..."
+echo "Installing/updating VSCodium, gh, and the lint toolchain..."
 sudo apt-get update -qq
-sudo apt-get install -y codium gh
+sudo apt-get install -y codium gh shellcheck jq fd-find yamllint
+
+# Debian ships fd as 'fdfind' because the name 'fd' was already taken by
+# another package. Nearly every fd example online says 'fd', so add the
+# conventional alias. /usr/local/bin, not ~/.local/bin: $HOME is bind-mounted
+# into the container and would leak this onto the HOST's PATH too (same
+# reasoning as the distrobox shim below). Never clobber a real 'fd' binary.
+if command -v fdfind >/dev/null 2>&1; then
+  FD_SHIM="/usr/local/bin/fd"
+  if [ -L "$FD_SHIM" ] || [ ! -e "$FD_SHIM" ]; then
+    sudo ln -sf "$(command -v fdfind)" "$FD_SHIM"
+  fi
+fi
+
+# --- actionlint -------------------------------------------------------------
+# Debian 12 has no actionlint package, so install the upstream release binary.
+# Unlike the apt repos above there is no signing key to pin against, so the
+# trust anchor here is an explicit SHA-256 of the exact tarball. Do NOT switch
+# this to a bare `curl | tar` or to "latest" - an unverified download of a
+# binary that then lints your CI config is a poor trade.
+#
+# TO BUMP: pick the new version, then get its checksum from
+#   https://github.com/rhysd/actionlint/releases/download/vX.Y.Z/actionlint_X.Y.Z_checksums.txt
+ACTIONLINT_VERSION="1.7.12"
+ACTIONLINT_SHA256_amd64="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+ACTIONLINT_SHA256_arm64="325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
+
+ACTIONLINT_ARCH="$(dpkg --print-architecture)"
+case "$ACTIONLINT_ARCH" in
+  amd64) ACTIONLINT_SHA256="$ACTIONLINT_SHA256_amd64" ;;
+  arm64) ACTIONLINT_SHA256="$ACTIONLINT_SHA256_arm64" ;;
+  *)     ACTIONLINT_SHA256="" ;;
+esac
+
+# Skip quietly if this arch has no pinned checksum, or if the pinned version is
+# already installed. Re-runs of this script are meant to be cheap.
+if [ -z "$ACTIONLINT_SHA256" ]; then
+  echo "Note: no pinned actionlint checksum for architecture '${ACTIONLINT_ARCH}' - skipping actionlint."
+elif [ "$(actionlint --version 2>/dev/null | head -n1)" = "$ACTIONLINT_VERSION" ]; then
+  echo "actionlint ${ACTIONLINT_VERSION} already installed."
+else
+  echo "Installing actionlint ${ACTIONLINT_VERSION}..."
+  ACTIONLINT_TMP="$(mktemp -d)"
+  ACTIONLINT_TAR="actionlint_${ACTIONLINT_VERSION}_linux_${ACTIONLINT_ARCH}.tar.gz"
+  if wget -qO "${ACTIONLINT_TMP}/${ACTIONLINT_TAR}" \
+      "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${ACTIONLINT_TAR}"; then
+    # Verify BEFORE unpacking, and bail out without installing on a mismatch.
+    if printf '%s  %s\n' "$ACTIONLINT_SHA256" "${ACTIONLINT_TMP}/${ACTIONLINT_TAR}" \
+        | sha256sum --check --status; then
+      tar xzf "${ACTIONLINT_TMP}/${ACTIONLINT_TAR}" -C "$ACTIONLINT_TMP" actionlint
+      sudo install -m 0755 "${ACTIONLINT_TMP}/actionlint" /usr/local/bin/actionlint
+      echo "actionlint ${ACTIONLINT_VERSION} installed."
+    else
+      echo "WARNING: actionlint checksum mismatch - refusing to install it. Everything else is unaffected."
+    fi
+  else
+    echo "WARNING: could not download actionlint - skipping it. Everything else is unaffected."
+  fi
+  rm -rf "$ACTIONLINT_TMP"
+fi
 
 # Symlink 'distrobox' -> distrobox-host-exec inside the container, so that
 # running `distrobox ...` from VSCodium's integrated terminal (which is
