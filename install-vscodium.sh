@@ -166,8 +166,24 @@ patch_launcher_flags() {
   #
   # Only touch the command after distrobox-enter's "--" separator, and only a
   # token that ends in "codium" (e.g. /usr/share/codium/codium) - never the
-  # "-n vscodium-box" container name, which also contains "codium".
+  # "-n vscodium-box" container name, which also contains "codium". This
+  # matches both the main Exec= line and the "New Window" action's Exec=.
   sed -i -E '/^Exec=/ s#(--[[:space:]]+[^[:space:]]*codium)([[:space:]])#\1 --disable-gpu-compositing\2#' "$desktop_file"
+
+  # Fix the icon. distrobox-export can't find VSCodium's icon (it lives in the
+  # container's /usr/share/pixmaps, which - unlike $HOME - isn't shared with
+  # the host), so it falls back to a hardcoded path to the generic Debian
+  # icon. Copy the real icon out of the container onto the host, then point
+  # every Icon= line at it by absolute path (absolute paths always resolve,
+  # regardless of the host's icon-theme setup).
+  local host_icon="$HOME/.local/share/icons/vscodium.png"
+  if distrobox enter "$CONTAINER_NAME" -- test -f /usr/share/pixmaps/vscodium.png 2>/dev/null; then
+    mkdir -p "$(dirname "$host_icon")"
+    distrobox enter "$CONTAINER_NAME" -- cat /usr/share/pixmaps/vscodium.png > "$host_icon" 2>/dev/null || true
+    if [ -s "$host_icon" ]; then
+      sed -i -E "s#^Icon=.*#Icon=${host_icon}#" "$desktop_file"
+    fi
+  fi
 }
 
 do_install() {
