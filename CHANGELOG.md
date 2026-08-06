@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-06
+
 ### Changed
 
 - README.md now describes the project as a development environment provisioner rather than an editor installer, which is what it became once it started installing git, gh, and the lint toolchain alongside VSCodium. The opening section states that the environment is defined by this one script, so it is reproducible and survives a container rebuild, and that new tools should be added here rather than installed by hand into the container. The repository description and topics on GitHub were updated to match.
