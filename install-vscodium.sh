@@ -25,7 +25,7 @@ set -euo pipefail
 
 # Bump this whenever the script's install logic changes. Only shown in
 # --debug output, so you can tell which version produced a given log.
-BUILD="2026.08.05-1"
+BUILD="2026.08.05-2"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
@@ -143,6 +143,28 @@ echo "Installing/updating VSCodium and gh..."
 sudo apt-get update -qq
 sudo apt-get install -y codium gh
 
+# Symlink 'distrobox' -> distrobox-host-exec inside the container, so that
+# running `distrobox ...` from VSCodium's integrated terminal (which is
+# itself inside this container) forwards to the real host distrobox instead
+# of silently doing nothing (this container has no podman/docker or socket
+# access of its own). distrobox itself uses this same shim pattern for
+# xdg-open, so it goes in /usr/local/bin, not ~/.local/bin - $HOME is bind-
+# mounted into the container, so anything under ~/.local/bin would leak onto
+# the HOST's PATH too and break the host's own real `distrobox` command.
+# /usr/local/bin is part of the container's own (non-shared) filesystem.
+# Only touch it if nothing's there yet, or if it's a symlink we created
+# before - never clobber a real 'distrobox' binary.
+DISTROBOX_HOST_EXEC="$(command -v distrobox-host-exec || true)"
+if [ -n "$DISTROBOX_HOST_EXEC" ]; then
+  DISTROBOX_SHIM="/usr/local/bin/distrobox"
+  if [ -L "$DISTROBOX_SHIM" ] || [ ! -e "$DISTROBOX_SHIM" ]; then
+    sudo ln -sf "$DISTROBOX_HOST_EXEC" "$DISTROBOX_SHIM"
+    echo "Symlinked 'distrobox' -> distrobox-host-exec in /usr/local/bin (container-local)."
+  else
+    echo "Note: /usr/local/bin/distrobox already exists and isn't a symlink this script manages - leaving it alone."
+  fi
+fi
+
 echo "Exporting VSCodium to the host app menu..."
 distrobox-export --app codium
 INNER
@@ -173,15 +195,25 @@ patch_launcher_flags() {
   # Fix the icon. distrobox-export can't find VSCodium's icon (it lives in the
   # container's /usr/share/pixmaps, which - unlike $HOME - isn't shared with
   # the host), so it falls back to a hardcoded path to the generic Debian
-  # icon. Copy the real icon out of the container onto the host, then point
-  # every Icon= line at it by absolute path (absolute paths always resolve,
-  # regardless of the host's icon-theme setup).
-  local host_icon="$HOME/.local/share/icons/vscodium.png"
+  # icon. Copy the real icon out of the container onto the host.
+  #
+  # Install it into the hicolor icon *theme* (by name, via the standard
+  # ~/.local/share/icons/hicolor/<size>/apps layout) rather than pointing
+  # Icon= at a raw absolute path. An absolute path works for the app-grid /
+  # start-menu entry (Gio.AppInfo resolves either form), but most taskbars
+  # and docks identify a running window via StartupWMClass, look up the
+  # matching .desktop file, and then resolve its Icon *name* through the
+  # icon theme - an absolute path doesn't resolve there, which is why the
+  # icon showed up in the start menu but not the taskbar.
+  local icon_theme_dir="$HOME/.local/share/icons/hicolor/512x512/apps"
+  local host_icon="${icon_theme_dir}/vscodium.png"
   if distrobox enter "$CONTAINER_NAME" -- test -f /usr/share/pixmaps/vscodium.png 2>/dev/null; then
-    mkdir -p "$(dirname "$host_icon")"
+    mkdir -p "$icon_theme_dir"
     distrobox enter "$CONTAINER_NAME" -- cat /usr/share/pixmaps/vscodium.png > "$host_icon" 2>/dev/null || true
     if [ -s "$host_icon" ]; then
-      sed -i -E "s#^Icon=.*#Icon=${host_icon}#" "$desktop_file"
+      sed -i -E "s#^Icon=.*#Icon=vscodium#" "$desktop_file"
+      # Drop the old absolute-path copy an earlier version of this script left behind.
+      rm -f "$HOME/.local/share/icons/vscodium.png"
     fi
   fi
 }

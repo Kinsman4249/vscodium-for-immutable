@@ -17,6 +17,30 @@ Immutable Fedora variants keep the base OS read-only, so you can't just
 userland) and export its launcher to the host. VSCodium publishes `.deb`
 packages via an apt repo, which is a perfect fit.
 
+### Why not Homebrew or Flatpak?
+
+Both are the usual answers for "installing a Linux desktop app without
+touching the base OS," and both fall short here:
+
+- **Homebrew** doesn't actually have a Linux VSCodium package. The official
+  `vscodium` cask on [formulae.brew.sh](https://formulae.brew.sh/cask/vscodium)
+  is macOS-only; on Linux you're pointed at unofficial third-party taps that
+  build from source, with no binary or signature backed by the VSCodium
+  project itself.
+- **Flatpak** does ship an official `com.vscodium.codium` on Flathub, but its
+  sandbox works against a dev editor: the
+  [flathub.vscodium README](https://github.com/daiyam/flathub.vscodium.stable/blob/master/README.md)
+  states plainly that it "is not able to access SDKs on your host system," so
+  each language toolchain needs its own separate Flatpak SDK extension
+  (`org.freedesktop.Sdk.Extension.dotnet`, `.golang`, etc.), enabled per-launch
+  via an env var - and coverage is still partial.
+
+This project's Distrobox container is a normal, unsandboxed Debian userland,
+so VSCodium gets the real official `.deb` (same binaries/signing as upstream's
+own apt repo) plus unrestricted access to whatever toolchains you install in
+the container or reach via `distrobox` commands - no per-language SDK
+extensions, no sandbox permission wrangling.
+
 ## What the installer does
 
 1. Creates a Debian 12 Distrobox container named `vscodium-box` (reused on
@@ -26,10 +50,20 @@ packages via an apt repo, which is a perfect fit.
 3. Also installs **git** and the **GitHub CLI (`gh`)** inside the container,
    from GitHub's official apt repo, so VSCodium's source control and any
    terminal/agent workflows have them on PATH.
-4. Exports VSCodium to the host application launcher via `distrobox-export`.
-5. Adds `--disable-gpu-compositing` to the exported launcher to work around an
+4. Symlinks `distrobox` -> `distrobox-host-exec` at `/usr/local/bin/distrobox`
+   *inside* the container, so running `distrobox ...` from VSCodium's
+   integrated terminal forwards to your real host distrobox instead of
+   silently doing nothing (the container has no podman/docker of its own).
+   See "Running distrobox from VSCodium's terminal" below.
+5. Exports VSCodium to the host application launcher via `distrobox-export`.
+6. Adds `--disable-gpu-compositing` to the exported launcher to work around an
    Electron GPU-process repaint bug seen on hybrid Intel+NVIDIA hardware. See
    "GPU note" below if you don't need it.
+7. Installs VSCodium's icon into the host's `hicolor` icon theme
+   (`~/.local/share/icons/hicolor/512x512/apps/vscodium.png`) and points the
+   launcher's `Icon=` at it by name, so it shows up correctly in both the
+   app grid/start menu and the taskbar/dock (an earlier version pointed
+   `Icon=` at an absolute file path, which most taskbars can't resolve).
 
 ## Prerequisites
 
@@ -48,6 +82,21 @@ packages via an apt repo, which is a perfect fit.
 ```
 
 Re-running the installer updates VSCodium (and git/gh) in place.
+
+## Running distrobox from VSCodium's terminal
+
+VSCodium's integrated terminal runs inside the `vscodium-box` container, which
+has no `podman`/`docker` or access to the host's container runtime. Running
+`distrobox` commands there directly would either fail or do nothing useful -
+it's not a nested/docker-in-docker situation, there's just no backend inside
+the container to talk to.
+
+The installer works around this by symlinking `distrobox` inside the
+container to [`distrobox-host-exec`](https://distrobox.it/usage/distrobox-host-exec/),
+a tool distrobox ships for exactly this purpose: it forwards a command to run
+on the real host. So `distrobox list`, `distrobox enter foo`, etc. typed in
+VSCodium's terminal act on your actual host containers, not on `vscodium-box`
+itself.
 
 ## GPU note
 
