@@ -6,8 +6,8 @@ install `.deb`/`.rpm` packages onto the base OS.
 
 It installs **VSCodium** from its official `.deb` package into a Distrobox
 container, along with the tools you actually need next to an editor: **git**,
-the **GitHub CLI**, and a lint toolchain (**shellcheck**, **actionlint**,
-**jq**, **fd**, **yamllint**). The editor is then exported to the host
+the **GitHub CLI**, **Claude Code**, and a lint toolchain (**shellcheck**,
+**actionlint**, **jq**, **fd**, **yamllint**). The editor is then exported to the host
 application menu and launches like any native app.
 
 Because VSCodium's integrated terminal runs inside that container, everything
@@ -68,6 +68,13 @@ extensions, no sandbox permission wrangling.
    has no actionlint package, so its upstream release binary is downloaded
    and checked against a SHA-256 pinned in the script. A checksum mismatch
    skips actionlint and leaves the rest of the install untouched.
+5. Installs **Claude Code** from Anthropic's signed apt repository (`stable`
+   channel), rather than the `curl | bash` one-liner the
+   [docs](https://code.claude.com/docs/en/setup) lead with, so it is pinned to
+   a signing key like everything else here and upgrades with the rest of the
+   container. The key's published fingerprint is verified before it is
+   trusted; a mismatch skips Claude Code and leaves the rest of the install
+   untouched. Run `claude` in VSCodium's terminal and log in on first use.
 5. Symlinks `distrobox` -> `distrobox-host-exec` at `/usr/local/bin/distrobox`
    *inside* the container, so running `distrobox ...` from VSCodium's
    integrated terminal forwards to your real host distrobox instead of
@@ -100,8 +107,9 @@ extensions, no sandbox permission wrangling.
 ./install-vscodium.sh --help     # show help
 ```
 
-Re-running the installer updates VSCodium (and git/gh, and the lint
-toolchain) in place. actionlint is skipped on a re-run if the pinned version
+Re-running the installer updates VSCodium (and git/gh, Claude Code, and the
+lint toolchain) in place. Claude Code installed from apt does not update
+itself, so a re-run is how it moves forward. actionlint is skipped on a re-run if the pinned version
 is already installed, so repeat runs stay cheap.
 
 ## Running distrobox from VSCodium's terminal
@@ -140,7 +148,8 @@ shellcheck install-vscodium.sh # correctness
 ```
 
 Then do a full `./install-vscodium.sh` and confirm VSCodium launches from the
-app grid, its integrated terminal has `git`, `gh`, and `actionlint`, and
+app grid, its integrated terminal has `git`, `gh`, `actionlint`, and `claude`
+(check with `claude --version`), and
 `./install-vscodium.sh --remove` tears everything down cleanly.
 
 Note that the toolchain lives inside the inner heredoc that runs in the

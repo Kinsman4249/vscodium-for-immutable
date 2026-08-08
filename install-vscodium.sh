@@ -8,9 +8,9 @@
 # VSCodium from its official apt repository inside it, then uses
 # `distrobox-export` to expose the app's .desktop entry on the host so it
 # shows up in your app grid and runs like a native app (window, file
-# dialogs, integrated terminal, etc. all work normally). git and the GitHub
-# CLI (gh) are installed in the same container so VSCodium's source control
-# and any terminal/agent workflows have them on PATH.
+# dialogs, integrated terminal, etc. all work normally). git, the GitHub
+# CLI (gh), and Claude Code are installed in the same container so VSCodium's
+# source control and any terminal/agent workflows have them on PATH.
 #
 # This deliberately ships NO virtualization/Cowork tooling - VSCodium
 # doesn't need it, so there is no QEMU/vhost_vsock anywhere in here.
@@ -25,7 +25,7 @@ set -euo pipefail
 
 # Bump this whenever the script's install logic changes. Only shown in
 # --debug output, so you can tell which version produced a given log.
-BUILD="2026.08.05-2"
+BUILD="2026.08.08-1"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
@@ -139,9 +139,62 @@ if [ ! -f /etc/apt/sources.list.d/github-cli.list ]; then
     | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
 fi
 
+# --- Claude Code apt repository --------------------------------------------
+# Anthropic publishes signed apt/dnf/apk repositories, so Claude Code is
+# installed the same signed-by way as the two repos above rather than through
+# the `curl https://claude.ai/install.sh | bash` one-liner the docs lead with.
+# A package manager install is the better fit here: it survives container
+# rebuilds through this script, and it keeps the binary out of ~/.local/bin,
+# which is bind-mounted from the host and would put a container-built binary
+# on the HOST's PATH (same reasoning as the fd and distrobox shims below).
+# Method and key fingerprint: https://code.claude.com/docs/en/setup
+#
+# The 'stable' channel is roughly a week behind 'latest' and skips releases
+# with major regressions. To follow 'latest' instead, both the URL path and
+# the suite name change: .../apt/latest latest main
+#
+# Unlike VSCodium and gh, upstream publishes the key's fingerprint, so verify
+# it before trusting the key instead of relying on HTTPS alone. --with-colons
+# is the machine-readable form; the human-readable output is spaced in groups
+# of four and would need normalizing before it could be compared.
+CLAUDE_KEYRING="/etc/apt/keyrings/claude-code.asc"
+CLAUDE_FINGERPRINT="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+if [ ! -f "$CLAUDE_KEYRING" ]; then
+  echo "Installing the Claude Code signing key..."
+  sudo mkdir -p -m 755 /etc/apt/keyrings
+  CLAUDE_KEY_TMP="$(mktemp)"
+  if wget -qO "$CLAUDE_KEY_TMP" https://downloads.claude.ai/keys/claude-code.asc; then
+    if gpg --show-keys --with-colons "$CLAUDE_KEY_TMP" 2>/dev/null \
+        | grep -q "^fpr:*${CLAUDE_FINGERPRINT}:"; then
+      sudo install -m 0644 "$CLAUDE_KEY_TMP" "$CLAUDE_KEYRING"
+    else
+      echo "WARNING: Claude Code signing key did not match the expected fingerprint - refusing to install it. Everything else is unaffected."
+    fi
+  else
+    echo "WARNING: could not download the Claude Code signing key - skipping Claude Code. Everything else is unaffected."
+  fi
+  rm -f "$CLAUDE_KEY_TMP"
+fi
+# Only register the repo if the key actually passed the gate above; a repo
+# whose signed-by keyring is missing makes every later `apt-get update` fail.
+if [ -f "$CLAUDE_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/claude-code.list ]; then
+  echo "Registering the Claude Code apt repository..."
+  echo "deb [signed-by=${CLAUDE_KEYRING}] https://downloads.claude.ai/claude-code/apt/stable stable main" \
+    | sudo tee /etc/apt/sources.list.d/claude-code.list >/dev/null
+fi
+
 echo "Installing/updating VSCodium, gh, and the lint toolchain..."
 sudo apt-get update -qq
 sudo apt-get install -y codium gh shellcheck jq fd-find yamllint
+
+# Separate from the install above so a bad day at downloads.claude.ai can't
+# take VSCodium itself down with it. apt installs of Claude Code do not
+# self-update; re-running this script upgrades it along with everything else.
+if [ -f /etc/apt/sources.list.d/claude-code.list ]; then
+  echo "Installing/updating Claude Code..."
+  sudo apt-get install -y claude-code \
+    || echo "WARNING: could not install Claude Code. Everything else is unaffected."
+fi
 
 # Debian ships fd as 'fdfind' because the name 'fd' was already taken by
 # another package. Nearly every fd example online says 'fd', so add the
@@ -294,7 +347,8 @@ do_install() {
 
   echo
   echo "Done. VSCodium should now appear in your application launcher."
-  echo "git and gh are installed inside the '$CONTAINER_NAME' container too."
+  echo "git, gh, and Claude Code are installed inside the '$CONTAINER_NAME' container too."
+  echo "Run 'claude' in VSCodium's terminal and log in on first use."
   echo "Re-run this script any time to update it."
 }
 
