@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-08
+
+### Added
+
+- The installer now provisions Claude Code inside `vscodium-box`, alongside VSCodium, git, gh, and the lint toolchain. It is installed from the signed apt repository on the `stable` channel rather than through the `curl https://claude.ai/install.sh | bash` one-liner the upstream documentation leads with. A package manager install is the better fit for this project: it is pinned to a signing key like every other repository the script adds, it upgrades along with everything else when the script is re-run, and it keeps the binary out of `~/.local/bin`, which is bind-mounted from the host and would otherwise place a container-built binary on the host's own PATH. That is the same reasoning already applied to the `fd` and `distrobox` shims. Unlike the VSCodium and GitHub CLI repositories, upstream publishes the key's fingerprint, so the script verifies it with `gpg --show-keys --with-colons` before trusting the key instead of relying on the HTTPS download alone. The machine-readable form is used deliberately, because the human-readable output is spaced in groups of four and would have to be normalized before it could be compared.
+- Failure handling for the new step is deliberately narrow, so that a bad day at the download host cannot take the rest of the environment down with it. A key that fails to download, or one whose fingerprint does not match, prints a warning, skips Claude Code, and leaves everything else untouched. The repository is only registered once the key has actually passed that gate, because a source list whose `signed-by` keyring is missing makes every subsequent `apt-get update` fail. The package itself is installed in its own `apt-get install` call rather than being appended to the existing one, so a failure there cannot prevent VSCodium from being installed or updated.
+- The build stamp moved to `2026.08.08-1`, and `README.md` now documents the new step, the reason the signed repository was chosen over the install script, and the fact that an apt install of Claude Code does not update itself, so re-running the installer is how it moves forward. The testing section now expects `claude` on PATH in the integrated terminal, verified with `claude --version`.
+
 ## [1.2.1] - 2026-08-06
 
 ### Changed
