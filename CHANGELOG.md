@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-08-13
+
+### Added
+
+- `provision-container.sh` now installs **runpodctl** from the upstream release binary, v2.9.0, pinned by SHA-256 checksum per architecture. The binary is placed in `/usr/local/bin` and is available inside the container for interaction with Runpod's cloud API and pod management.
+
 ## [3.1.0] - 2026-08-13
 
 ### Added
