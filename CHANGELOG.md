@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-13
+
+### Added
+
+- `install-vscodium.sh` gained two new opt-out flags to go with the new defaults below: `--wayland`, which switches the display mount back to the native Wayland socket instead of XWayland, and `--no-gpu`, which forces `--disable-gpu` even when `/dev/dri` is present. Both are creation-time-only, same as the flags they sit alongside.
+- Uninstalling is now a separate `uninstall-vscodium.sh` script instead of `install-vscodium.sh --remove`. It does exactly what `--remove` used to: delete the `vscodium-box` container, the host launcher and `.desktop` entry, and known leftovers from the pre-podman Distrobox setup (its exported `.desktop` file and icon), while leaving the repos directory, the container's private home, and the saved `--repos-dir` config untouched. `install-vscodium.sh` points to it in its own `--help` output and in the message it prints when it finds a container that needs recreating.
+
+### Changed
+
+- `install-vscodium.sh` now defaults to XWayland plus GPU passthrough (`USE_X11=1`, `USE_GPU=1`) instead of native Wayland with software rendering. The reason is a reproducible crash: on the host this was tested against (KWin 6.7.3 / Plasma 6), VSCodium's bundled Electron binds `zwp_linux_dmabuf_v1` version 4 while KWin offers version 5, and Electron's handling of that protocol's `format_table` event segfaults within about a minute of the window opening, with or without GPU compositing disabled. XWayland uses the older, stable X11 Ozone backend and does not hit that path, so it is now what a plain `./install-vscodium.sh` gives you. GPU passthrough follows the same "make the common case work" reasoning: `/dev/dri` is now passed through automatically when it exists, with a silent fall-back to software rendering (no `die`) when it does not, rather than requiring an explicit `--gpu` flag as before. The old `--gpu` and `--x11` flags still parse and are still accepted - they are just no-ops now, kept only so that existing muscle memory and scripts referencing them do not break.
+- README.md was refactored to match: the "What the container can and cannot reach" table now lists `/dev/dri` and the X11 socket as on by default and the Wayland socket as opt-in via `--wayland`; a new "Wayland note" section documents the `zwp_linux_dmabuf_v1` crash in full and gives the `ausearch`/`audit2allow` recipe for the separate SELinux `connectto` policy module that native Wayland needs beyond the mount-level `z` relabel; and the "GPU note" section was rewritten since `--disable-gpu-compositing` is now applied unconditionally (it fixes a GPU-process repaint bug, not GPU access) while `--disable-gpu` itself is now conditional on GPU passthrough being off.
+
+### Removed
+
+- The `--remove` flag was removed from `install-vscodium.sh`; the `ACTION="remove"` branch and its `do_remove()` implementation are gone. Anything still invoking `install-vscodium.sh --remove` - a saved alias, a script, muscle memory - now gets `Error: Unknown option: --remove` instead of a teardown. Use `./uninstall-vscodium.sh` instead, per the Added entry above.
+
+### Fixed
+
+- The X11 socket, the `XAUTHORITY` file, and the Wayland socket bind mounts in `create_container()` now all carry the `,z` SELinux relabel option; previously only the two writable mounts (repos dir, container home) got it, and the display sockets were mounted read-only without a relabel. That gap matters now that XWayland is the default path: without `z` on `/tmp/.X11-unix/X$N` and `$XAUTHORITY`, `container_t` cannot read them under enforcing SELinux, and VSCodium would exit with no window and no visible error outside `--debug`, the same failure mode already noted for the Wayland socket in the prior release.
+
 ## [2.0.0] - 2026-08-12
 
 ### Changed
