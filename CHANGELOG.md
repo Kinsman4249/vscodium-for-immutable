@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-13
+
+### Added
+
+- `provision-container.sh` now installs **Chromium** from Debian's own repo (no extra signing key needed, unlike VSCodium/gh/Claude Code). It's a plain browser so sites that gate login behind a WebAuthn/passkey prompt handled in-browser JS can be used from inside the container. It does not wire up a physical security key (YubiKey/FIDO2 USB) - that would need `/dev/hidraw` or `/dev/bus/usb` passed into the container, which `install-vscodium.sh` does not do.
+
 ## [3.0.0] - 2026-08-13
 
 ### Added
