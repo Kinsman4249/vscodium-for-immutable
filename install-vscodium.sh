@@ -4,369 +4,538 @@
 # (Bazzite, Silverblue, Kinoite, and similar) that can't install .deb/.rpm
 # packages directly onto the base OS.
 #
-# How it works: this keeps a small Debian 12 Distrobox container, installs
-# VSCodium from its official apt repository inside it, then uses
-# `distrobox-export` to expose the app's .desktop entry on the host so it
-# shows up in your app grid and runs like a native app (window, file
-# dialogs, integrated terminal, etc. all work normally). git, the GitHub
-# CLI (gh), and Claude Code are installed in the same container so VSCodium's
+# How it works: this keeps a small Debian 12 container, managed with rootless
+# podman, installs VSCodium from its official apt repository inside it, and
+# writes a launcher plus a .desktop entry on the host so it shows up in your
+# app grid and runs like a native app. git, the GitHub CLI (gh), the lint
+# toolchain, and Claude Code are installed in the same container, so VSCodium's
 # source control and any terminal/agent workflows have them on PATH.
 #
-# This deliberately ships NO virtualization/Cowork tooling - VSCodium
-# doesn't need it, so there is no QEMU/vhost_vsock anywhere in here.
+# WHAT THE CONTAINER CAN REACH ON THE HOST - this is the whole point of the
+# script, so it is stated exactly. Three bind mounts, and nothing else:
+#
+#   1. the directory you pass to --repos-dir, read-write
+#   2. the container's own private home (settings, extensions, dotfiles,
+#      Claude Code auth), which lives under ~/.local/state and is used by
+#      nothing else on the host
+#   3. the Wayland socket, read-only, so a window can be drawn
+#
+# It does NOT get your host home directory, the host filesystem, host /tmp,
+# host devices, host processes, or the host D-Bus session. It is not
+# privileged and SELinux confinement stays on.
+#
+# This deliberately does NOT use distrobox, which an earlier version of this
+# script did. distrobox always bind-mounts the host $HOME at its real path and
+# always mounts all of / at /run/host, in a --privileged container with SELinux
+# and AppArmor confinement disabled. Its own documentation says the --home flag
+# "will NOT prevent the mount of the host's home directory", and no --unshare-*
+# flag removes /run/host. There is no way to get repo-scoped access out of it.
+# See docs/usage/distrobox-create.md and
+# pkg/containermanager/providers/podman.go in github.com/89luca89/distrobox.
+#
+# Things you give up compared to the old distrobox setup, all documented in
+# README.md: no `distrobox` command from the integrated terminal, no host
+# browser/notifications/portals (no D-Bus), software rendering unless you pass
+# --gpu, and no host access to ports you serve inside the box unless you pass
+# --publish.
+#
+# Run this from a HOST terminal, not from VSCodium's integrated terminal - the
+# container has no path back to the host any more.
 #
 # Usage:
-#   ./install-vscodium.sh            install, or update if already installed
-#   ./install-vscodium.sh --debug    same, but print every command run
-#   ./install-vscodium.sh --remove   uninstall: drop the exported app + container
-#   ./install-vscodium.sh --help     show this help
+#   ./install-vscodium.sh --repos-dir DIR   install, scoping container access
+#                                            to DIR (e.g. ~/github); required
+#                                            the first time
+#   ./install-vscodium.sh                   update if already installed, or
+#                                            reuse a previously saved --repos-dir
+#   ./install-vscodium.sh --gpu             also pass /dev/dri through, for
+#                                            hardware rendering (creation only)
+#   ./install-vscodium.sh --x11             use XWayland instead of Wayland
+#                                            (creation only)
+#   ./install-vscodium.sh --publish PORT    publish a container port on the
+#                                            host loopback (creation only,
+#                                            repeatable)
+#   ./install-vscodium.sh --debug           same, but print every command run
+#   ./install-vscodium.sh --remove          uninstall: drop the launcher, the
+#                                            .desktop entry and the container
+#                                            (repos and the container's private
+#                                            home are never touched)
+#   ./install-vscodium.sh --help            show this help
 #
 set -euo pipefail
 
-# Bump this whenever the script's install logic changes. Only shown in
-# --debug output, so you can tell which version produced a given log.
-BUILD="2026.08.08-1"
+# Bump this whenever the script's install logic changes. Only shown in --debug
+# output, so you can tell which version produced a given log.
+BUILD="2026.08.12-2"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROVISION_SCRIPT="${SCRIPT_DIR}/provision-container.sh"
+
+# $HOME on ostree systems is usually /home/<user>, a symlink to /var/home/<user>.
+# podman needs the real path for mount sources, and the checks below compare
+# canonical paths, so resolve it once here.
+HOME_REAL="$(realpath -e "$HOME")"
+
+# The container's private home (settings, dotfiles, extensions, Claude Code
+# auth). Mounted into the container at the same path the host home has, so that
+# `~` and absolute paths behave normally inside - but the contents are this
+# directory, not your host home.
+CONTAINER_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/vscodium-box/home"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vscodium-box"
+CONFIG_FILE="${CONFIG_DIR}/repos-dir"
+
+# Host-side files this script writes. None of these are reachable from inside
+# the container, which is what stops a process in there from rewriting the
+# launcher you click on.
+WRAPPER="$HOME/.local/bin/${CONTAINER_NAME}"
+DESKTOP_FILE="$HOME/.local/share/applications/${CONTAINER_NAME}.desktop"
+ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+ICON_FILE="${ICON_DIR}/vscodium.png"
+
 DEBUG=0
 ACTION="install"
+REPOS_DIR=""
+USE_GPU=0
+USE_X11=0
+PUBLISH_PORTS=()
 
-for arg in "$@"; do
-  case "$arg" in
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
     --debug)
       DEBUG=1
+      shift
       ;;
     --remove)
       ACTION="remove"
+      shift
+      ;;
+    --gpu)
+      USE_GPU=1
+      shift
+      ;;
+    --x11)
+      USE_X11=1
+      shift
+      ;;
+    --publish)
+      [ -n "${2:-}" ] || die "--publish requires a port number."
+      PUBLISH_PORTS+=("$2")
+      shift 2
+      ;;
+    --publish=*)
+      PUBLISH_PORTS+=("${1#*=}")
+      shift
+      ;;
+    --repos-dir)
+      REPOS_DIR="${2:-}"
+      [ -n "$REPOS_DIR" ] || die "--repos-dir requires a path argument."
+      shift 2
+      ;;
+    --repos-dir=*)
+      REPOS_DIR="${1#*=}"
+      shift
       ;;
     -h|--help)
-      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "Unknown option: $arg (use --help)" >&2
-      exit 1
+      die "Unknown option: $1 (use --help)"
       ;;
   esac
 done
 
 # --debug prints the build number once, then makes every command visible
-# (set -x) instead of a separate custom logging function - it's the
-# simplest way to give a full trace without maintaining two code paths.
+# (set -x) instead of a separate custom logging function - it's the simplest
+# way to give a full trace without maintaining two code paths.
 if [ "$DEBUG" -eq 1 ]; then
   echo "[debug] install-vscodium.sh build $BUILD"
   set -x
 fi
 
-# Path to the temp script copied into the container; global (not function-
-# local) so the cleanup trap below can still see it if a later command in
-# do_install fails and exits the script early.
-INNER_SCRIPT=""
-trap 'rm -f "$INNER_SCRIPT"' EXIT
+require_podman() {
+  # /run/.containerenv exists in podman containers, /.dockerenv in docker ones.
+  # Catch this early: the old distrobox setup let you run this script from
+  # VSCodium's own terminal, and that no longer works by design.
+  if [ -f /run/.containerenv ] || [ -f /.dockerenv ] || [ -n "${container:-}" ]; then
+    die "this looks like it's running inside a container. Run it from a host terminal instead."
+  fi
+  command -v podman >/dev/null 2>&1 \
+    || die "podman is not installed or not on PATH. See https://podman.io/docs/installation"
+  [ -f "$PROVISION_SCRIPT" ] \
+    || die "provision-container.sh not found next to this script (looked in $SCRIPT_DIR)."
+}
 
-require_distrobox() {
-  if ! command -v distrobox >/dev/null 2>&1; then
-    echo "Error: distrobox is not installed or not on PATH." >&2
-    echo "See https://github.com/89luca89/distrobox for install instructions." >&2
+container_exists() {
+  podman container exists "$CONTAINER_NAME"
+}
+
+# Refuse to touch a container left over from the distrobox era. It has the same
+# name but a completely different (wide open) mount set, and it holds the user's
+# old settings, so deleting it silently would be wrong.
+check_legacy_container() {
+  local manager
+  manager="$(podman inspect "$CONTAINER_NAME" \
+    --format '{{index .Config.Labels "manager"}}' 2>/dev/null || true)"
+  if [ "$manager" = "distrobox" ]; then
+    echo "The existing '$CONTAINER_NAME' container was created by distrobox, which gave it" >&2
+    echo "your whole home directory and the host filesystem. This script no longer manages" >&2
+    echo "containers like that. To move over:" >&2
+    echo >&2
+    echo "  distrobox rm --force $CONTAINER_NAME" >&2
+    echo "  rm -f ~/.local/share/applications/${CONTAINER_NAME}-codium.desktop" >&2
+    echo "  $0 --repos-dir DIR" >&2
+    echo >&2
+    echo "Your old VSCodium settings and extensions lived in that container's home and are" >&2
+    echo "removed with it; the new container starts with a fresh, private home." >&2
     exit 1
   fi
 }
 
-container_exists() {
-  # `distrobox list` is the only stable cross-backend (podman/docker) way
-  # to enumerate containers; match the NAME column between pipe delimiters
-  # so we don't accidentally match a substring of another container's name.
-  distrobox list 2>/dev/null | grep -qE "\| *${CONTAINER_NAME} *\|"
+# Validates a candidate repos directory and echoes its canonical path. Used for
+# both the --repos-dir argument and whatever is read back out of the config
+# file, because that file lives on disk between runs and is not trusted input.
+validate_repos_dir() {
+  local candidate="$1" canon
+
+  # ':' and ',' are field separators in a podman --volume argument; a path
+  # containing either could turn one mount into something quite different.
+  case "$candidate" in
+    *:*|*,*) die "repos dir must not contain ':' or ',': $candidate" ;;
+  esac
+  [ -d "$candidate" ] || die "repos dir is not a directory: $candidate"
+
+  # realpath resolves symlinks and '..', so the checks below can't be dodged
+  # with either. A symlinked repos dir is fine; what gets mounted is its target.
+  canon="$(realpath -e "$candidate")" || die "cannot resolve repos dir: $candidate"
+
+  case "$canon" in
+    /|/home|/var/home|/root|/etc|/usr|/var|/tmp)
+      die "refusing to mount '$canon' into the container." ;;
+  esac
+  [ "$canon" != "$HOME_REAL" ] \
+    || die "refusing to mount your whole home directory. Pick a subdirectory, e.g. ~/github"
+  case "$canon/" in
+    "$HOME_REAL"/*) ;;
+    *) die "repos dir must live under $HOME (got: $canon)" ;;
+  esac
+
+  printf '%s\n' "$canon"
+}
+
+save_repos_dir() {
+  mkdir -p "$CONFIG_DIR"
+  printf '%s\n' "$1" > "$CONFIG_FILE"
+}
+
+# Refuses to use the saved repos dir unless the file it came from is safe:
+# another local user with write access to it could otherwise point the next
+# run's mount wherever they liked. (The container itself cannot reach this path
+# at all - that is the point of where these files live.)
+#
+# This is a separate function from the read below because `die` inside a command
+# substitution would only kill the subshell, and the caller would carry on with
+# an empty value as though the file simply wasn't there.
+check_config_file_safe() {
+  local mode
+  [ ! -L "$CONFIG_FILE" ] || die "$CONFIG_FILE is a symlink - refusing to read it."
+  [ -O "$CONFIG_FILE" ] || die "$CONFIG_FILE is not owned by you - refusing to read it."
+  mode="$(stat -c '%a' "$CONFIG_FILE")"
+  # Last two digits are group and other; anything writable there is a no.
+  case "$mode" in
+    *[2367]?|*[2367]) die "$CONFIG_FILE is group- or world-writable (mode $mode) - refusing to read it. chmod 600 it." ;;
+  esac
+}
+
+# Echoes the first line of the config file, so a file with trailing junk appended
+# to it cannot smuggle anything in.
+read_saved_repos_dir() {
+  local line
+  IFS= read -r line < "$CONFIG_FILE" || true
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line"
+}
+
+# Fills in REPOS_DIR from --repos-dir if given (and persists it for next time),
+# else from the saved config, else fails with instructions.
+resolve_repos_dir() {
+  local saved
+  if [ -n "$REPOS_DIR" ]; then
+    REPOS_DIR="$(validate_repos_dir "$REPOS_DIR")" || exit 1
+    save_repos_dir "$REPOS_DIR"
+    return
+  fi
+  if [ -f "$CONFIG_FILE" ]; then
+    check_config_file_safe
+    if saved="$(read_saved_repos_dir)"; then
+      REPOS_DIR="$(validate_repos_dir "$saved")" || exit 1
+      return
+    fi
+  fi
+  echo "Error: no repos directory known yet. Pass --repos-dir DIR (e.g. --repos-dir ~/github)" >&2
+  echo "the first time you run this script. It's the only folder of yours the container" >&2
+  echo "will be able to see." >&2
+  exit 1
 }
 
 create_container() {
-  echo "Creating distrobox container '$CONTAINER_NAME' ($IMAGE)..."
-  distrobox create --yes --name "$CONTAINER_NAME" --image "$IMAGE"
+  local uid gid user wayland_sock create_args port
+
+  uid="$(id -u)"
+  gid="$(id -g)"
+  user="$(id -un)"
+
+  echo "Creating container '$CONTAINER_NAME' ($IMAGE)..."
+  echo "Scoping container filesystem access to: $REPOS_DIR"
+  mkdir -p "$CONTAINER_HOME"
+  chmod 0700 "$CONTAINER_HOME"
+
+  # The mount and namespace set below IS the security contract. Read it as a
+  # list of what the container gets, and assume anything not listed is denied.
+  #
+  # Deliberately absent: --privileged, --security-opt label=disable, --pid host,
+  # --ipc host, --network host, /dev, /sys, /run/host, host /tmp, and the D-Bus
+  # session socket. podman defaults to a private PID namespace, a private IPC
+  # namespace and a private network namespace, so those need no flag.
+  create_args=(
+    --name "$CONTAINER_NAME"
+    --hostname "$CONTAINER_NAME"
+    # keep-id maps your host uid to the same uid inside, so files written into
+    # the repos mount keep the right ownership on the host side.
+    --userns keep-id
+    --user "${uid}:${gid}"
+    # podman's default /dev/shm is 64MB, which Chromium/Electron renderers
+    # routinely exhaust and then crash on.
+    --shm-size 512m
+    # ',z' relabels the mount for SELinux, which is Enforcing on these hosts;
+    # without it a container_t process cannot read your user_home_t files. 'z'
+    # (shared) rather than 'Z' (private), so host tools keep working on the
+    # same files.
+    --volume "${CONTAINER_HOME}:${HOME_REAL}:rw,z"
+    --volume "${REPOS_DIR}:${REPOS_DIR}:rw,z"
+    --env "HOME=${HOME_REAL}"
+    --env "XDG_RUNTIME_DIR=/run/user/${uid}"
+    --env "USER=${user}"
+  )
+
+  if [ "$USE_X11" -eq 1 ]; then
+    # XWayland fallback for when Electron won't start on Wayland. Only the one
+    # socket is exposed, read-only.
+    local display_num="${DISPLAY##*:}"
+    display_num="${display_num%%.*}"
+    [ -S "/tmp/.X11-unix/X${display_num}" ] \
+      || die "no X11 socket at /tmp/.X11-unix/X${display_num} (DISPLAY=${DISPLAY:-unset})."
+    create_args+=(
+      --volume "/tmp/.X11-unix/X${display_num}:/tmp/.X11-unix/X${display_num}:ro"
+      --env "DISPLAY=:${display_num}"
+    )
+    if [ -n "${XAUTHORITY:-}" ] && [ -f "$XAUTHORITY" ]; then
+      create_args+=(
+        --volume "${XAUTHORITY}:/run/user/${uid}/.Xauthority:ro"
+        --env "XAUTHORITY=/run/user/${uid}/.Xauthority"
+      )
+    fi
+  else
+    [ -n "${WAYLAND_DISPLAY:-}" ] \
+      || die "WAYLAND_DISPLAY is not set - run this from your desktop session, or pass --x11."
+    wayland_sock="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/${WAYLAND_DISPLAY}"
+    [ -S "$wayland_sock" ] || die "no Wayland socket at $wayland_sock."
+    create_args+=(
+      --volume "${wayland_sock}:/run/user/${uid}/${WAYLAND_DISPLAY}:ro"
+      --env "WAYLAND_DISPLAY=${WAYLAND_DISPLAY}"
+      # Tells Electron to use its Wayland backend rather than defaulting to X11.
+      --env "ELECTRON_OZONE_PLATFORM_HINT=wayland"
+    )
+  fi
+
+  if [ "$USE_GPU" -eq 1 ]; then
+    [ -d /dev/dri ] || die "--gpu was passed but /dev/dri does not exist on this host."
+    create_args+=(--device /dev/dri)
+  fi
+
+  # Loopback only, never 0.0.0.0: publishing a dev server to the whole network
+  # is not something an install script should do behind your back.
+  for port in ${PUBLISH_PORTS+"${PUBLISH_PORTS[@]}"}; do
+    case "$port" in
+      *[!0-9]*) die "--publish takes a port number, got: $port" ;;
+    esac
+    create_args+=(--publish "127.0.0.1:${port}:${port}")
+  done
+
+  echo "Relabeling mounts for SELinux - on a large repos directory this can take a moment..."
+  # 'sleep infinity' just keeps the container alive; the launcher runs VSCodium
+  # with `podman exec` against it.
+  podman create "${create_args[@]}" "$IMAGE" sleep infinity >/dev/null
 }
 
-# Everything below runs inside the container as one script. It's written to
-# a file under $HOME (always bind-mounted into the container by distrobox)
-# rather than passed inline, because quoting a multi-line apt/gpg script
-# through `distrobox enter -- bash -c "..."` gets unreadable fast.
-build_inner_script() {
-  local out="$1"
-  cat > "$out" <<'INNER'
+provision_container() {
+  echo "Provisioning the container (this is the slow part on a first run)..."
+  podman start "$CONTAINER_NAME" >/dev/null
+  podman exec --interactive --user root \
+    --env "BOX_USER=$(id -un)" \
+    --env "BOX_UID=$(id -u)" \
+    --env "BOX_GID=$(id -g)" \
+    --env "BOX_HOME=${HOME_REAL}" \
+    --env "BOX_DEBUG=${DEBUG}" \
+    "$CONTAINER_NAME" bash -s < "$PROVISION_SCRIPT"
+}
+
+# Replaces what distrobox-export used to do. Generating the launcher and the
+# .desktop entry outright is simpler than patching whatever a tool emitted, and
+# both files now live somewhere the container cannot write to.
+write_launcher() {
+  local gpu_flags="--disable-gpu-compositing"
+  local env_args="" name value line
+
+  # Everything the launcher needs is read back off the container rather than
+  # from this run's flags, so that a plain update run (where --gpu/--x11 were
+  # not repeated) still regenerates a launcher that matches how the container
+  # was actually created.
+  #
+  # The environment is passed explicitly instead of relying on `podman exec`
+  # inheriting what `podman create --env` set: podman's exec documentation does
+  # not promise that inheritance, and a launcher that silently loses
+  # WAYLAND_DISPLAY just fails to open a window.
+  while IFS= read -r line; do
+    name="${line%%=*}"
+    value="${line#*=}"
+    case "$name" in
+      HOME|USER|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|DISPLAY|XAUTHORITY|ELECTRON_OZONE_PLATFORM_HINT)
+        env_args+=" --env $(printf '%q' "${name}=${value}")"
+        ;;
+    esac
+  done < <(podman inspect "$CONTAINER_NAME" --format '{{range .Config.Env}}{{println .}}{{end}}')
+
+  # Without /dev/dri there is no GPU to use at all, so ask Electron for software
+  # rendering directly instead of letting it probe and fail.
+  #
+  # --disable-gpu-compositing is kept in both cases: on this hybrid
+  # Intel+NVIDIA hardware the GPU-process repaint bug shows up as garbled or
+  # ghosted text, and disabling GPU *compositing* (not all acceleration) clears
+  # it. If your VSCodium renders fine without it, drop the flag from the Exec
+  # line in the launcher below; it is re-added on the next run of this script.
+  if ! podman exec "$CONTAINER_NAME" test -d /dev/dri 2>/dev/null; then
+    gpu_flags="--disable-gpu --disable-gpu-compositing"
+  fi
+
+  mkdir -p "$(dirname "$WRAPPER")" "$(dirname "$DESKTOP_FILE")"
+
+  cat > "$WRAPPER" <<WRAPPER_EOF
+#!/usr/bin/env bash
+# Generated by install-vscodium.sh (build ${BUILD}) - edits are overwritten on
+# the next run. Starts the ${CONTAINER_NAME} container if needed, then runs
+# VSCodium inside it.
 set -euo pipefail
+podman start ${CONTAINER_NAME} >/dev/null
+exec podman exec --interactive${env_args} ${CONTAINER_NAME} \\
+  /usr/bin/codium ${gpu_flags} "\$@"
+WRAPPER_EOF
+  chmod 0755 "$WRAPPER"
 
-echo "Updating package lists..."
-sudo apt-get update -qq
+  cat > "$DESKTOP_FILE" <<DESKTOP_EOF
+[Desktop Entry]
+Type=Application
+Name=VSCodium
+GenericName=Text Editor
+Comment=Code editing, running in the ${CONTAINER_NAME} container
+Exec=${WRAPPER} %F
+Icon=vscodium
+Terminal=false
+Categories=Utility;TextEditor;Development;IDE;
+MimeType=text/plain;inode/directory;
+StartupNotify=true
+StartupWMClass=VSCodium
+Keywords=vscode;codium;
+DESKTOP_EOF
+  chmod 0644 "$DESKTOP_FILE"
 
-echo "Ensuring base tooling (curl, gnupg, wget, ca-certificates, git) is present..."
-sudo apt-get install -y -qq curl gnupg wget ca-certificates git >/dev/null
-
-# --- VSCodium apt repository -----------------------------------------------
-# Official method from https://vscodium.com/ : pull the signing key, dearmor
-# it into a dedicated keyring, and pin the repo to that keyring with
-# signed-by. That pinning is the trust anchor - apt will refuse any package
-# from this repo that isn't signed by exactly this key - so no separate
-# fingerprint gate is needed here. Debian 12 uses the one-line .list format.
-VSCODIUM_KEYRING="/usr/share/keyrings/vscodium-archive-keyring.gpg"
-if [ ! -f "$VSCODIUM_KEYRING" ]; then
-  echo "Installing the VSCodium signing key..."
-  wget -qO - https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg \
-    | gpg --dearmor \
-    | sudo dd of="$VSCODIUM_KEYRING" status=none
-fi
-if [ ! -f /etc/apt/sources.list.d/vscodium.list ]; then
-  echo "Registering the VSCodium apt repository..."
-  echo "deb [arch=amd64,arm64 signed-by=${VSCODIUM_KEYRING}] https://download.vscodium.com/debs vscodium main" \
-    | sudo tee /etc/apt/sources.list.d/vscodium.list >/dev/null
-fi
-
-# --- GitHub CLI (gh) apt repository ----------------------------------------
-# Debian 12 doesn't carry gh in its own repos, so install it from GitHub's
-# apt repo (official method from
-# https://github.com/cli/cli/blob/trunk/docs/install_linux.md). Same
-# signed-by pinning model as above.
-GH_KEYRING="/etc/apt/keyrings/githubcli-archive-keyring.gpg"
-if [ ! -f "$GH_KEYRING" ]; then
-  echo "Installing the GitHub CLI signing key..."
-  sudo mkdir -p -m 755 /etc/apt/keyrings
-  wget -qO - https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | sudo dd of="$GH_KEYRING" status=none
-  sudo chmod go+r "$GH_KEYRING"
-fi
-if [ ! -f /etc/apt/sources.list.d/github-cli.list ]; then
-  echo "Registering the GitHub CLI apt repository..."
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=${GH_KEYRING}] https://cli.github.com/packages stable main" \
-    | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-fi
-
-# --- Claude Code apt repository --------------------------------------------
-# Anthropic publishes signed apt/dnf/apk repositories, so Claude Code is
-# installed the same signed-by way as the two repos above rather than through
-# the `curl https://claude.ai/install.sh | bash` one-liner the docs lead with.
-# A package manager install is the better fit here: it survives container
-# rebuilds through this script, and it keeps the binary out of ~/.local/bin,
-# which is bind-mounted from the host and would put a container-built binary
-# on the HOST's PATH (same reasoning as the fd and distrobox shims below).
-# Method and key fingerprint: https://code.claude.com/docs/en/setup
-#
-# The 'stable' channel is roughly a week behind 'latest' and skips releases
-# with major regressions. To follow 'latest' instead, both the URL path and
-# the suite name change: .../apt/latest latest main
-#
-# Unlike VSCodium and gh, upstream publishes the key's fingerprint, so verify
-# it before trusting the key instead of relying on HTTPS alone. --with-colons
-# is the machine-readable form; the human-readable output is spaced in groups
-# of four and would need normalizing before it could be compared.
-CLAUDE_KEYRING="/etc/apt/keyrings/claude-code.asc"
-CLAUDE_FINGERPRINT="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
-if [ ! -f "$CLAUDE_KEYRING" ]; then
-  echo "Installing the Claude Code signing key..."
-  sudo mkdir -p -m 755 /etc/apt/keyrings
-  CLAUDE_KEY_TMP="$(mktemp)"
-  if wget -qO "$CLAUDE_KEY_TMP" https://downloads.claude.ai/keys/claude-code.asc; then
-    if gpg --show-keys --with-colons "$CLAUDE_KEY_TMP" 2>/dev/null \
-        | grep -q "^fpr:*${CLAUDE_FINGERPRINT}:"; then
-      sudo install -m 0644 "$CLAUDE_KEY_TMP" "$CLAUDE_KEYRING"
-    else
-      echo "WARNING: Claude Code signing key did not match the expected fingerprint - refusing to install it. Everything else is unaffected."
-    fi
+  # Install the icon into the hicolor icon *theme* (by name, via the standard
+  # ~/.local/share/icons/hicolor/<size>/apps layout) rather than pointing Icon=
+  # at a raw absolute path. An absolute path works for the app-grid entry
+  # (Gio.AppInfo resolves either form), but most taskbars and docks identify a
+  # running window via StartupWMClass, look up the matching .desktop file, and
+  # then resolve its Icon *name* through the icon theme - an absolute path
+  # doesn't resolve there, which is why the icon used to show up in the start
+  # menu but not the taskbar.
+  mkdir -p "$ICON_DIR"
+  if podman cp "${CONTAINER_NAME}:/usr/share/pixmaps/vscodium.png" "$ICON_FILE" 2>/dev/null; then
+    :
   else
-    echo "WARNING: could not download the Claude Code signing key - skipping Claude Code. Everything else is unaffected."
-  fi
-  rm -f "$CLAUDE_KEY_TMP"
-fi
-# Only register the repo if the key actually passed the gate above; a repo
-# whose signed-by keyring is missing makes every later `apt-get update` fail.
-if [ -f "$CLAUDE_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/claude-code.list ]; then
-  echo "Registering the Claude Code apt repository..."
-  echo "deb [signed-by=${CLAUDE_KEYRING}] https://downloads.claude.ai/claude-code/apt/stable stable main" \
-    | sudo tee /etc/apt/sources.list.d/claude-code.list >/dev/null
-fi
-
-echo "Installing/updating VSCodium, gh, and the lint toolchain..."
-sudo apt-get update -qq
-sudo apt-get install -y codium gh shellcheck jq fd-find yamllint
-
-# Separate from the install above so a bad day at downloads.claude.ai can't
-# take VSCodium itself down with it. apt installs of Claude Code do not
-# self-update; re-running this script upgrades it along with everything else.
-if [ -f /etc/apt/sources.list.d/claude-code.list ]; then
-  echo "Installing/updating Claude Code..."
-  sudo apt-get install -y claude-code \
-    || echo "WARNING: could not install Claude Code. Everything else is unaffected."
-fi
-
-# Debian ships fd as 'fdfind' because the name 'fd' was already taken by
-# another package. Nearly every fd example online says 'fd', so add the
-# conventional alias. /usr/local/bin, not ~/.local/bin: $HOME is bind-mounted
-# into the container and would leak this onto the HOST's PATH too (same
-# reasoning as the distrobox shim below). Never clobber a real 'fd' binary.
-if command -v fdfind >/dev/null 2>&1; then
-  FD_SHIM="/usr/local/bin/fd"
-  if [ -L "$FD_SHIM" ] || [ ! -e "$FD_SHIM" ]; then
-    sudo ln -sf "$(command -v fdfind)" "$FD_SHIM"
-  fi
-fi
-
-# --- actionlint -------------------------------------------------------------
-# Debian 12 has no actionlint package, so install the upstream release binary.
-# Unlike the apt repos above there is no signing key to pin against, so the
-# trust anchor here is an explicit SHA-256 of the exact tarball. Do NOT switch
-# this to a bare `curl | tar` or to "latest" - an unverified download of a
-# binary that then lints your CI config is a poor trade.
-#
-# TO BUMP: pick the new version, then get its checksum from
-#   https://github.com/rhysd/actionlint/releases/download/vX.Y.Z/actionlint_X.Y.Z_checksums.txt
-ACTIONLINT_VERSION="1.7.12"
-ACTIONLINT_SHA256_amd64="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
-ACTIONLINT_SHA256_arm64="325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
-
-ACTIONLINT_ARCH="$(dpkg --print-architecture)"
-case "$ACTIONLINT_ARCH" in
-  amd64) ACTIONLINT_SHA256="$ACTIONLINT_SHA256_amd64" ;;
-  arm64) ACTIONLINT_SHA256="$ACTIONLINT_SHA256_arm64" ;;
-  *)     ACTIONLINT_SHA256="" ;;
-esac
-
-# Skip quietly if this arch has no pinned checksum, or if the pinned version is
-# already installed. Re-runs of this script are meant to be cheap.
-if [ -z "$ACTIONLINT_SHA256" ]; then
-  echo "Note: no pinned actionlint checksum for architecture '${ACTIONLINT_ARCH}' - skipping actionlint."
-elif [ "$(actionlint --version 2>/dev/null | head -n1)" = "$ACTIONLINT_VERSION" ]; then
-  echo "actionlint ${ACTIONLINT_VERSION} already installed."
-else
-  echo "Installing actionlint ${ACTIONLINT_VERSION}..."
-  ACTIONLINT_TMP="$(mktemp -d)"
-  ACTIONLINT_TAR="actionlint_${ACTIONLINT_VERSION}_linux_${ACTIONLINT_ARCH}.tar.gz"
-  if wget -qO "${ACTIONLINT_TMP}/${ACTIONLINT_TAR}" \
-      "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${ACTIONLINT_TAR}"; then
-    # Verify BEFORE unpacking, and bail out without installing on a mismatch.
-    if printf '%s  %s\n' "$ACTIONLINT_SHA256" "${ACTIONLINT_TMP}/${ACTIONLINT_TAR}" \
-        | sha256sum --check --status; then
-      tar xzf "${ACTIONLINT_TMP}/${ACTIONLINT_TAR}" -C "$ACTIONLINT_TMP" actionlint
-      sudo install -m 0755 "${ACTIONLINT_TMP}/actionlint" /usr/local/bin/actionlint
-      echo "actionlint ${ACTIONLINT_VERSION} installed."
-    else
-      echo "WARNING: actionlint checksum mismatch - refusing to install it. Everything else is unaffected."
-    fi
-  else
-    echo "WARNING: could not download actionlint - skipping it. Everything else is unaffected."
-  fi
-  rm -rf "$ACTIONLINT_TMP"
-fi
-
-# Symlink 'distrobox' -> distrobox-host-exec inside the container, so that
-# running `distrobox ...` from VSCodium's integrated terminal (which is
-# itself inside this container) forwards to the real host distrobox instead
-# of silently doing nothing (this container has no podman/docker or socket
-# access of its own). distrobox itself uses this same shim pattern for
-# xdg-open, so it goes in /usr/local/bin, not ~/.local/bin - $HOME is bind-
-# mounted into the container, so anything under ~/.local/bin would leak onto
-# the HOST's PATH too and break the host's own real `distrobox` command.
-# /usr/local/bin is part of the container's own (non-shared) filesystem.
-# Only touch it if nothing's there yet, or if it's a symlink we created
-# before - never clobber a real 'distrobox' binary.
-DISTROBOX_HOST_EXEC="$(command -v distrobox-host-exec || true)"
-if [ -n "$DISTROBOX_HOST_EXEC" ]; then
-  DISTROBOX_SHIM="/usr/local/bin/distrobox"
-  if [ -L "$DISTROBOX_SHIM" ] || [ ! -e "$DISTROBOX_SHIM" ]; then
-    sudo ln -sf "$DISTROBOX_HOST_EXEC" "$DISTROBOX_SHIM"
-    echo "Symlinked 'distrobox' -> distrobox-host-exec in /usr/local/bin (container-local)."
-  else
-    echo "Note: /usr/local/bin/distrobox already exists and isn't a symlink this script manages - leaving it alone."
-  fi
-fi
-
-echo "Exporting VSCodium to the host app menu..."
-distrobox-export --app codium
-INNER
-}
-
-# distrobox-export writes the .desktop file straight to the host (container
-# and host share $HOME), so this runs after the container step, not inside it.
-patch_launcher_flags() {
-  local desktop_file="$HOME/.local/share/applications/${CONTAINER_NAME}-codium.desktop"
-  if [ ! -f "$desktop_file" ]; then
-    return 0
+    echo "Note: could not copy VSCodium's icon out of the container - the launcher will use a fallback icon."
   fi
 
-  # Disables Chromium GPU *compositing* only (not all acceleration) in the
-  # exported launcher. VSCodium is an Electron app, and on this hybrid
-  # Intel+NVIDIA hardware the same GPU-process repaint bug that affected
-  # Claude Desktop shows up as garbled/ghosted text; disabling GPU
-  # compositing clears it. If your VSCodium renders fine without this, delete
-  # the "--disable-gpu-compositing" token from the Exec= line of the file
-  # above (it'll be re-added next run - remove this sed line to stop that).
-  #
-  # Only touch the command after distrobox-enter's "--" separator, and only a
-  # token that ends in "codium" (e.g. /usr/share/codium/codium) - never the
-  # "-n vscodium-box" container name, which also contains "codium". This
-  # matches both the main Exec= line and the "New Window" action's Exec=.
-  sed -i -E '/^Exec=/ s#(--[[:space:]]+[^[:space:]]*codium)([[:space:]])#\1 --disable-gpu-compositing\2#' "$desktop_file"
-
-  # Fix the icon. distrobox-export can't find VSCodium's icon (it lives in the
-  # container's /usr/share/pixmaps, which - unlike $HOME - isn't shared with
-  # the host), so it falls back to a hardcoded path to the generic Debian
-  # icon. Copy the real icon out of the container onto the host.
-  #
-  # Install it into the hicolor icon *theme* (by name, via the standard
-  # ~/.local/share/icons/hicolor/<size>/apps layout) rather than pointing
-  # Icon= at a raw absolute path. An absolute path works for the app-grid /
-  # start-menu entry (Gio.AppInfo resolves either form), but most taskbars
-  # and docks identify a running window via StartupWMClass, look up the
-  # matching .desktop file, and then resolve its Icon *name* through the
-  # icon theme - an absolute path doesn't resolve there, which is why the
-  # icon showed up in the start menu but not the taskbar.
-  local icon_theme_dir="$HOME/.local/share/icons/hicolor/512x512/apps"
-  local host_icon="${icon_theme_dir}/vscodium.png"
-  if distrobox enter "$CONTAINER_NAME" -- test -f /usr/share/pixmaps/vscodium.png 2>/dev/null; then
-    mkdir -p "$icon_theme_dir"
-    distrobox enter "$CONTAINER_NAME" -- cat /usr/share/pixmaps/vscodium.png > "$host_icon" 2>/dev/null || true
-    if [ -s "$host_icon" ]; then
-      sed -i -E "s#^Icon=.*#Icon=vscodium#" "$desktop_file"
-      # Drop the old absolute-path copy an earlier version of this script left behind.
-      rm -f "$HOME/.local/share/icons/vscodium.png"
-    fi
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$(dirname "$DESKTOP_FILE")" >/dev/null 2>&1 || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
   fi
 }
 
 do_install() {
-  require_distrobox
+  require_podman
 
   if container_exists; then
-    echo "Container '$CONTAINER_NAME' already exists - updating VSCodium in place."
+    check_legacy_container
+    echo "Container '$CONTAINER_NAME' already exists - updating in place."
+    if [ -n "$REPOS_DIR" ] || [ "$USE_GPU" -eq 1 ] || [ "$USE_X11" -eq 1 ] \
+       || [ ${#PUBLISH_PORTS[@]} -gt 0 ]; then
+      echo "Note: --repos-dir, --gpu, --x11 and --publish only take effect when the container"
+      echo "is created. Run '$0 --remove' and install again to change them."
+      if [ -n "$REPOS_DIR" ]; then
+        REPOS_DIR="$(validate_repos_dir "$REPOS_DIR")" || exit 1
+        save_repos_dir "$REPOS_DIR"
+      fi
+    fi
   else
+    resolve_repos_dir
     create_container
   fi
 
-  INNER_SCRIPT="$(mktemp -p "$HOME" .vscodium-install-XXXXXX.sh)"
-  build_inner_script "$INNER_SCRIPT"
-
-  distrobox enter "$CONTAINER_NAME" -- bash "$INNER_SCRIPT"
-  patch_launcher_flags
+  provision_container
+  write_launcher
 
   echo
   echo "Done. VSCodium should now appear in your application launcher."
-  echo "git, gh, and Claude Code are installed inside the '$CONTAINER_NAME' container too."
+  echo "git, gh, the lint toolchain and Claude Code are installed inside the container too."
   echo "Run 'claude' in VSCodium's terminal and log in on first use."
-  echo "Re-run this script any time to update it."
+  echo "Re-run this script any time to update everything."
 }
 
 do_remove() {
-  require_distrobox
+  require_podman
 
-  if ! container_exists; then
-    echo "Container '$CONTAINER_NAME' doesn't exist - nothing to remove."
-    exit 0
+  if container_exists; then
+    echo "Deleting container '$CONTAINER_NAME'..."
+    podman rm --force "$CONTAINER_NAME" >/dev/null
+  else
+    echo "Container '$CONTAINER_NAME' doesn't exist - nothing to delete."
   fi
 
-  echo "Removing exported app entry from the host..."
-  distrobox enter "$CONTAINER_NAME" -- distrobox-export --app codium --delete || true
-
-  echo "Deleting container '$CONTAINER_NAME'..."
-  distrobox rm --force "$CONTAINER_NAME"
+  echo "Removing the launcher and app entry from the host..."
+  rm -f "$WRAPPER" "$DESKTOP_FILE" "$ICON_FILE"
+  # Leftovers from the distrobox-based versions of this script.
+  rm -f "$HOME/.local/share/applications/${CONTAINER_NAME}-codium.desktop"
+  rm -f "$HOME/.local/share/icons/vscodium.png"
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$(dirname "$DESKTOP_FILE")" >/dev/null 2>&1 || true
+  fi
 
   echo "Done. VSCodium and its container have been removed."
+  echo "Your repos were only ever mounted at \$REPOS_DIR and are untouched."
+  if [ -d "$CONTAINER_HOME" ]; then
+    echo "The container's own settings/extensions/dotfiles are still on disk at:"
+    echo "  $CONTAINER_HOME"
+    echo "Delete that directory yourself if you want a completely clean slate."
+  fi
 }
 
 case "$ACTION" in
