@@ -6,10 +6,10 @@ install `.deb`/`.rpm` packages onto the base OS.
 
 It installs **VSCodium** from its official `.deb` package into a rootless
 **podman** container, along with the tools you actually need next to an editor:
-**git**, the **GitHub CLI**, **Claude Code**, and a lint toolchain
-(**shellcheck**, **actionlint**, **jq**, **fd**, **yamllint**). The script then
-writes a launcher and a `.desktop` entry on the host, so the editor starts from
-the app grid like any native app.
+**git**, the **GitHub CLI**, **Claude Code**, **Chromium**, and a lint
+toolchain (**shellcheck**, **actionlint**, **jq**, **fd**, **yamllint**). The
+script then writes a launcher and a `.desktop` entry on the host, so the
+editor starts from the app grid like any native app.
 
 Because VSCodium's integrated terminal runs inside that container, everything
 the script installs is already on PATH there. That is the point of the design:
@@ -155,14 +155,20 @@ or a route back out to the rest of the host.
    [docs](https://code.claude.com/docs/en/setup) lead with, so it is pinned to
    a signing key like everything else here and upgrades with the rest of the
    container. Run `claude` in VSCodium's terminal and log in on first use.
-7. Writes a launcher at `~/.local/bin/vscodium-box` and a `.desktop` entry at
+7. Installs **Chromium** from Debian's own repo (no extra signing key needed
+   for that one). This is a plain browser for sites that gate login behind a
+   WebAuthn/passkey prompt handled entirely in-browser JS - it does not wire
+   up a physical security key (YubiKey/FIDO2 USB), since that would need
+   `/dev/hidraw` or `/dev/bus/usb` passed into the container, which this
+   script does not do.
+8. Writes a launcher at `~/.local/bin/vscodium-box` and a `.desktop` entry at
    `~/.local/share/applications/vscodium-box.desktop` on the host. Neither is
    reachable from inside the container, so a process in there cannot rewrite
    the thing you click on.
-8. Adds `--disable-gpu-compositing` to the launcher's command line
+9. Adds `--disable-gpu-compositing` to the launcher's command line
    unconditionally, and `--disable-gpu` too if `/dev/dri` isn't available (or
    `--no-gpu` was passed). See [GPU note](#gpu-note) below.
-9. Installs VSCodium's icon into the host's `hicolor` icon theme
+10. Installs VSCodium's icon into the host's `hicolor` icon theme
    (`~/.local/share/icons/hicolor/512x512/apps/vscodium.png`) and points the
    launcher's `Icon=` at it by name, so it shows up correctly in both the
    app grid/start menu and the taskbar/dock (an earlier version pointed
@@ -235,8 +241,8 @@ would defeat the point. `--repos-dir`, `--wayland`, `--no-gpu`/`--gpu` and
 still accepted - they're just the defaults now, kept as no-ops so old habits
 and scripts don't break.)
 
-Re-running the installer updates VSCodium (and git/gh, Claude Code, and the
-lint toolchain) in place. Claude Code installed from apt does not update itself,
+Re-running the installer updates VSCodium (and git/gh, Claude Code, Chromium,
+and the lint toolchain) in place. Claude Code installed from apt does not update itself,
 so a re-run is how it moves forward. actionlint is skipped on a re-run if the
 pinned version is already installed, so repeat runs stay cheap.
 

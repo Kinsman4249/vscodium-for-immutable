@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever this script's logic changes. Shown in --debug output so you
 # can tell which version produced a given log.
-BUILD="2026.08.12-2"
+BUILD="2026.08.13-1"
 
 if [ "${BOX_DEBUG:-0}" = "1" ]; then
   echo "[debug] provision-container.sh build $BUILD"
@@ -265,6 +265,20 @@ if [ -f /etc/apt/sources.list.d/claude-code.list ]; then
   apt-get install -y claude-code \
     || echo "WARNING: could not install Claude Code. Everything else is unaffected."
 fi
+
+# --- Chromium ----------------------------------------------------------------
+# Debian 12 carries chromium in its own main repo, so this needs no separate
+# signing key or apt source - unlike VSCodium/gh/Claude Code above.
+#
+# Reason it's here: sites that gate login behind a WebAuthn/passkey prompt run
+# that flow entirely in the browser's own JS, so having a real browser inside
+# the container is enough to click through them. This does NOT wire up a
+# physical security key (YubiKey/FIDO2 USB) - that would need /dev/hidraw or
+# /dev/bus/usb passed into the container, which install-vscodium.sh does not
+# do.
+echo "Installing/updating Chromium..."
+apt-get install -y chromium \
+  || echo "WARNING: could not install Chromium. Everything else is unaffected."
 
 # Debian ships fd as 'fdfind' because the name 'fd' was already taken by another
 # package. Nearly every fd example online says 'fd', so add the conventional
