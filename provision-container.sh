@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever this script's logic changes. Shown in --debug output so you
 # can tell which version produced a given log.
-BUILD="2026.08.13-1"
+BUILD="2026.08.13-2"
 
 if [ "${BOX_DEBUG:-0}" = "1" ]; then
   echo "[debug] provision-container.sh build $BUILD"
@@ -336,6 +336,48 @@ else
     echo "WARNING: could not download actionlint - skipping it. Everything else is unaffected."
   fi
   rm -rf "$ACTIONLINT_TMP"
+fi
+
+# --- runpodctl ---------------------------------------------------------------
+# Debian 12 has no runpodctl package, so install the upstream release binary,
+# same approach as actionlint above: pin the version and per-arch SHA-256, no
+# signing key available for this one.
+#
+# TO BUMP: pick the new version, then get its checksums from
+#   https://github.com/runpod/runpodctl/releases/download/vX.Y.Z/checksums_X.Y.Z_sha256.txt
+RUNPODCTL_VERSION="2.9.0"
+RUNPODCTL_SHA256_amd64="06e6f54957db79d5cd9f1909a7f1d365076826751ba2f5df65d75dde43a64148"
+RUNPODCTL_SHA256_arm64="b8afac8d983f255f566fba718e766a6959957ef7d8f2bae9dd965aadbadc92bd"
+
+RUNPODCTL_ARCH="$(dpkg --print-architecture)"
+case "$RUNPODCTL_ARCH" in
+  amd64) RUNPODCTL_SHA256="$RUNPODCTL_SHA256_amd64" ;;
+  arm64) RUNPODCTL_SHA256="$RUNPODCTL_SHA256_arm64" ;;
+  *)     RUNPODCTL_SHA256="" ;;
+esac
+
+if [ -z "$RUNPODCTL_SHA256" ]; then
+  echo "Note: no pinned runpodctl checksum for architecture '${RUNPODCTL_ARCH}' - skipping runpodctl."
+elif [ "$(runpodctl --version 2>/dev/null | awk '{print $NF}')" = "$RUNPODCTL_VERSION" ]; then
+  echo "runpodctl ${RUNPODCTL_VERSION} already installed."
+else
+  echo "Installing runpodctl ${RUNPODCTL_VERSION}..."
+  RUNPODCTL_TMP="$(mktemp -d)"
+  RUNPODCTL_BIN="runpodctl-linux-${RUNPODCTL_ARCH}"
+  if wget -qO "${RUNPODCTL_TMP}/${RUNPODCTL_BIN}" \
+      "https://github.com/runpod/runpodctl/releases/download/v${RUNPODCTL_VERSION}/${RUNPODCTL_BIN}"; then
+    # Verify BEFORE installing, and bail out without installing on a mismatch.
+    if printf '%s  %s\n' "$RUNPODCTL_SHA256" "${RUNPODCTL_TMP}/${RUNPODCTL_BIN}" \
+        | sha256sum --check --status; then
+      install -m 0755 "${RUNPODCTL_TMP}/${RUNPODCTL_BIN}" /usr/local/bin/runpodctl
+      echo "runpodctl ${RUNPODCTL_VERSION} installed."
+    else
+      echo "WARNING: runpodctl checksum mismatch - refusing to install it. Everything else is unaffected."
+    fi
+  else
+    echo "WARNING: could not download runpodctl - skipping it. Everything else is unaffected."
+  fi
+  rm -rf "$RUNPODCTL_TMP"
 fi
 
 echo "Container provisioning complete."
