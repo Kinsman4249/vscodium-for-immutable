@@ -12,16 +12,21 @@
 # source control and any terminal/agent workflows have them on PATH.
 #
 # WHAT THE CONTAINER CAN REACH ON THE HOST - this is the whole point of the
-# script, so it is stated exactly. Three bind mounts, and nothing else:
+# script, so it is stated exactly. Three bind mounts, plus /dev/dri if present,
+# and nothing else:
 #
 #   1. the directory you pass to --repos-dir, read-write
 #   2. the container's own private home (settings, extensions, dotfiles,
 #      Claude Code auth), which lives under ~/.local/state and is used by
 #      nothing else on the host
-#   3. the Wayland socket, read-only, so a window can be drawn
+#   3. the X11 socket (XWayland), read-only, so a window can be drawn. Native
+#      Wayland is available via --wayland but is not the default - see the
+#      Wayland note in README.md
+#   4. /dev/dri, for GPU-accelerated rendering, if the host has one and
+#      --no-gpu was not passed
 #
 # It does NOT get your host home directory, the host filesystem, host /tmp,
-# host devices, host processes, or the host D-Bus session. It is not
+# other host devices, host processes, or the host D-Bus session. It is not
 # privileged and SELinux confinement stays on.
 #
 # This deliberately does NOT use distrobox, which an earlier version of this
@@ -35,9 +40,8 @@
 #
 # Things you give up compared to the old distrobox setup, all documented in
 # README.md: no `distrobox` command from the integrated terminal, no host
-# browser/notifications/portals (no D-Bus), software rendering unless you pass
-# --gpu, and no host access to ports you serve inside the box unless you pass
-# --publish.
+# browser/notifications/portals (no D-Bus), and no host access to ports you
+# serve inside the box unless you pass --publish.
 #
 # Run this from a HOST terminal, not from VSCodium's integrated terminal - the
 # container has no path back to the host any more.
@@ -48,25 +52,26 @@
 #                                            the first time
 #   ./install-vscodium.sh                   update if already installed, or
 #                                            reuse a previously saved --repos-dir
-#   ./install-vscodium.sh --gpu             also pass /dev/dri through, for
-#                                            hardware rendering (creation only)
-#   ./install-vscodium.sh --x11             use XWayland instead of Wayland
-#                                            (creation only)
+#   ./install-vscodium.sh --wayland         use native Wayland instead of
+#                                            XWayland (creation only). Off by
+#                                            default: it crashes on some hosts,
+#                                            see the Wayland note in README.md
+#   ./install-vscodium.sh --no-gpu          force software rendering even if
+#                                            /dev/dri is available (creation
+#                                            only)
 #   ./install-vscodium.sh --publish PORT    publish a container port on the
 #                                            host loopback (creation only,
 #                                            repeatable)
 #   ./install-vscodium.sh --debug           same, but print every command run
-#   ./install-vscodium.sh --remove          uninstall: drop the launcher, the
-#                                            .desktop entry and the container
-#                                            (repos and the container's private
-#                                            home are never touched)
 #   ./install-vscodium.sh --help            show this help
+#
+# To uninstall, run ./uninstall-vscodium.sh instead.
 #
 set -euo pipefail
 
 # Bump this whenever the script's install logic changes. Only shown in --debug
 # output, so you can tell which version produced a given log.
-BUILD="2026.08.12-2"
+BUILD="2026.08.13-1"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
@@ -95,11 +100,17 @@ DESKTOP_FILE="$HOME/.local/share/applications/${CONTAINER_NAME}.desktop"
 ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
 ICON_FILE="${ICON_DIR}/vscodium.png"
 
+# Defaults: XWayland + GPU passthrough (if a GPU is present). Native Wayland
+# is opt-in via --wayland - on this host it crashes deterministically inside
+# Electron's zwp_linux_dmabuf_v1 handling against KWin 6.7's compositor
+# (upstream Electron/Chromium bug, not something a mount flag can fix), so
+# XWayland is the mode that actually works and is now the default.
 DEBUG=0
-ACTION="install"
 REPOS_DIR=""
-USE_GPU=0
-USE_X11=0
+USE_GPU=1
+USE_X11=1
+GPU_FLAG_GIVEN=0
+X11_FLAG_GIVEN=0
 PUBLISH_PORTS=()
 
 die() {
@@ -113,16 +124,26 @@ while [ $# -gt 0 ]; do
       DEBUG=1
       shift
       ;;
-    --remove)
-      ACTION="remove"
+    --gpu)
+      # Already the default; accepted so old habits/scripts don't break.
+      USE_GPU=1
+      GPU_FLAG_GIVEN=1
       shift
       ;;
-    --gpu)
-      USE_GPU=1
+    --no-gpu)
+      USE_GPU=0
+      GPU_FLAG_GIVEN=1
       shift
       ;;
     --x11)
+      # Already the default; accepted so old habits/scripts don't break.
       USE_X11=1
+      X11_FLAG_GIVEN=1
+      shift
+      ;;
+    --wayland)
+      USE_X11=0
+      X11_FLAG_GIVEN=1
       shift
       ;;
     --publish)
@@ -144,7 +165,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -190,8 +211,7 @@ check_legacy_container() {
     echo "your whole home directory and the host filesystem. This script no longer manages" >&2
     echo "containers like that. To move over:" >&2
     echo >&2
-    echo "  distrobox rm --force $CONTAINER_NAME" >&2
-    echo "  rm -f ~/.local/share/applications/${CONTAINER_NAME}-codium.desktop" >&2
+    echo "  ./uninstall-vscodium.sh" >&2
     echo "  $0 --repos-dir DIR" >&2
     echo >&2
     echo "Your old VSCodium settings and extensions lived in that container's home and are" >&2
@@ -334,12 +354,14 @@ create_container() {
     [ -S "/tmp/.X11-unix/X${display_num}" ] \
       || die "no X11 socket at /tmp/.X11-unix/X${display_num} (DISPLAY=${DISPLAY:-unset})."
     create_args+=(
-      --volume "/tmp/.X11-unix/X${display_num}:/tmp/.X11-unix/X${display_num}:ro"
+      # ',z' relabels for SELinux - see the matching comment on the Wayland
+      # socket mount below.
+      --volume "/tmp/.X11-unix/X${display_num}:/tmp/.X11-unix/X${display_num}:ro,z"
       --env "DISPLAY=:${display_num}"
     )
     if [ -n "${XAUTHORITY:-}" ] && [ -f "$XAUTHORITY" ]; then
       create_args+=(
-        --volume "${XAUTHORITY}:/run/user/${uid}/.Xauthority:ro"
+        --volume "${XAUTHORITY}:/run/user/${uid}/.Xauthority:ro,z"
         --env "XAUTHORITY=/run/user/${uid}/.Xauthority"
       )
     fi
@@ -349,7 +371,11 @@ create_container() {
     wayland_sock="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/${WAYLAND_DISPLAY}"
     [ -S "$wayland_sock" ] || die "no Wayland socket at $wayland_sock."
     create_args+=(
-      --volume "${wayland_sock}:/run/user/${uid}/${WAYLAND_DISPLAY}:ro"
+      # ',z' relabels the socket for SELinux, same as the other two mounts -
+      # without it container_t can't read the compositor's socket, Electron
+      # silently falls back to X11 (which isn't there either), and exits with
+      # no window and no error visible outside --debug.
+      --volume "${wayland_sock}:/run/user/${uid}/${WAYLAND_DISPLAY}:ro,z"
       --env "WAYLAND_DISPLAY=${WAYLAND_DISPLAY}"
       # Tells Electron to use its Wayland backend rather than defaulting to X11.
       --env "ELECTRON_OZONE_PLATFORM_HINT=wayland"
@@ -357,8 +383,14 @@ create_container() {
   fi
 
   if [ "$USE_GPU" -eq 1 ]; then
-    [ -d /dev/dri ] || die "--gpu was passed but /dev/dri does not exist on this host."
-    create_args+=(--device /dev/dri)
+    if [ -d /dev/dri ]; then
+      create_args+=(--device /dev/dri)
+    elif [ "$GPU_FLAG_GIVEN" -eq 1 ]; then
+      die "--gpu was passed but /dev/dri does not exist on this host."
+    fi
+    # else: GPU passthrough is on by default but there's no /dev/dri to pass -
+    # fall back to software rendering silently instead of failing every plain
+    # install on a host with no GPU device.
   fi
 
   # Loopback only, never 0.0.0.0: publishing a dev server to the whole network
@@ -486,10 +518,10 @@ do_install() {
   if container_exists; then
     check_legacy_container
     echo "Container '$CONTAINER_NAME' already exists - updating in place."
-    if [ -n "$REPOS_DIR" ] || [ "$USE_GPU" -eq 1 ] || [ "$USE_X11" -eq 1 ] \
+    if [ -n "$REPOS_DIR" ] || [ "$GPU_FLAG_GIVEN" -eq 1 ] || [ "$X11_FLAG_GIVEN" -eq 1 ] \
        || [ ${#PUBLISH_PORTS[@]} -gt 0 ]; then
-      echo "Note: --repos-dir, --gpu, --x11 and --publish only take effect when the container"
-      echo "is created. Run '$0 --remove' and install again to change them."
+      echo "Note: --repos-dir, --wayland, --gpu/--no-gpu and --publish only take effect when"
+      echo "the container is created. Run ./uninstall-vscodium.sh and install again to change them."
       if [ -n "$REPOS_DIR" ]; then
         REPOS_DIR="$(validate_repos_dir "$REPOS_DIR")" || exit 1
         save_repos_dir "$REPOS_DIR"
@@ -510,35 +542,4 @@ do_install() {
   echo "Re-run this script any time to update everything."
 }
 
-do_remove() {
-  require_podman
-
-  if container_exists; then
-    echo "Deleting container '$CONTAINER_NAME'..."
-    podman rm --force "$CONTAINER_NAME" >/dev/null
-  else
-    echo "Container '$CONTAINER_NAME' doesn't exist - nothing to delete."
-  fi
-
-  echo "Removing the launcher and app entry from the host..."
-  rm -f "$WRAPPER" "$DESKTOP_FILE" "$ICON_FILE"
-  # Leftovers from the distrobox-based versions of this script.
-  rm -f "$HOME/.local/share/applications/${CONTAINER_NAME}-codium.desktop"
-  rm -f "$HOME/.local/share/icons/vscodium.png"
-  if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$(dirname "$DESKTOP_FILE")" >/dev/null 2>&1 || true
-  fi
-
-  echo "Done. VSCodium and its container have been removed."
-  echo "Your repos were only ever mounted at \$REPOS_DIR and are untouched."
-  if [ -d "$CONTAINER_HOME" ]; then
-    echo "The container's own settings/extensions/dotfiles are still on disk at:"
-    echo "  $CONTAINER_HOME"
-    echo "Delete that directory yourself if you want a completely clean slate."
-  fi
-}
-
-case "$ACTION" in
-  install) do_install ;;
-  remove) do_remove ;;
-esac
+do_install
