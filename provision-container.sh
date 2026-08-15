@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever this script's logic changes. Shown in --debug output so you
 # can tell which version produced a given log.
-BUILD="2026.08.13-2"
+BUILD="2026.08.15-1"
 
 if [ "${BOX_DEBUG:-0}" = "1" ]; then
   echo "[debug] provision-container.sh build $BUILD"
@@ -209,7 +209,7 @@ if [ -f "$GH_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/github-cli.list ]; the
     > /etc/apt/sources.list.d/github-cli.list
 fi
 
-# --- Claude Code apt repository --------------------------------------------
+# --- Claude Code apt repository (optional, BOX_WITH_CLAUDE=1) ---------------
 # Anthropic publishes signed apt/dnf/apk repositories, so Claude Code is
 # installed the same signed-by way as the two repos above rather than through
 # the `curl https://claude.ai/install.sh | bash` one-liner the docs lead with.
@@ -220,22 +220,27 @@ fi
 # The 'stable' channel is roughly a week behind 'latest' and skips releases with
 # major regressions. To follow 'latest' instead, both the URL path and the suite
 # name change: .../apt/latest latest main
-CLAUDE_KEYRING="/etc/apt/keyrings/claude-code.asc"
-CLAUDE_FINGERPRINTS="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
-if [ ! -f "$CLAUDE_KEYRING" ]; then
-  echo "Installing the Claude Code signing key..."
-  if install_signing_key \
-      https://downloads.claude.ai/keys/claude-code.asc \
-      "$CLAUDE_KEYRING" "$CLAUDE_FINGERPRINTS"; then
-    :
-  else
-    echo "WARNING: could not install a trusted Claude Code signing key (download failed, or the key did not match the expected fingerprint) - skipping Claude Code."
+#
+# Off by default - DeepSeek Harness (below) is the default agent harness now.
+# Pass --claude to install-vscodium.sh to opt back into Claude Code.
+if [ "${BOX_WITH_CLAUDE:-0}" = "1" ]; then
+  CLAUDE_KEYRING="/etc/apt/keyrings/claude-code.asc"
+  CLAUDE_FINGERPRINTS="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+  if [ ! -f "$CLAUDE_KEYRING" ]; then
+    echo "Installing the Claude Code signing key..."
+    if install_signing_key \
+        https://downloads.claude.ai/keys/claude-code.asc \
+        "$CLAUDE_KEYRING" "$CLAUDE_FINGERPRINTS"; then
+      :
+    else
+      echo "WARNING: could not install a trusted Claude Code signing key (download failed, or the key did not match the expected fingerprint) - skipping Claude Code."
+    fi
   fi
-fi
-if [ -f "$CLAUDE_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/claude-code.list ]; then
-  echo "Registering the Claude Code apt repository..."
-  echo "deb [signed-by=${CLAUDE_KEYRING}] https://downloads.claude.ai/claude-code/apt/stable stable main" \
-    > /etc/apt/sources.list.d/claude-code.list
+  if [ -f "$CLAUDE_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/claude-code.list ]; then
+    echo "Registering the Claude Code apt repository..."
+    echo "deb [signed-by=${CLAUDE_KEYRING}] https://downloads.claude.ai/claude-code/apt/stable stable main" \
+      > /etc/apt/sources.list.d/claude-code.list
+  fi
 fi
 
 # --- packages ---------------------------------------------------------------
@@ -243,6 +248,13 @@ fi
 echo "Installing/updating the lint toolchain..."
 apt-get update -qq
 apt-get install -y shellcheck jq fd-find yamllint
+
+# Node.js + npm: prereq for DeepSeek Harness (below). Debian 12's own main repo
+# carries a recent-enough LTS build, so - like Chromium further down - this
+# needs no separate signing key or apt source.
+echo "Installing/updating Node.js..."
+apt-get install -y nodejs npm \
+  || echo "WARNING: could not install Node.js. DeepSeek Harness will be skipped."
 
 # VSCodium and gh each get their own install call, so that one repository having
 # a bad day cannot take the others down with it.
@@ -264,6 +276,23 @@ if [ -f /etc/apt/sources.list.d/claude-code.list ]; then
   echo "Installing/updating Claude Code..."
   apt-get install -y claude-code \
     || echo "WARNING: could not install Claude Code. Everything else is unaffected."
+fi
+
+# --- DeepSeek Harness (default agent harness) --------------------------------
+# DeepSeek's open-source (MIT) agent harness, "dsh". Node-based, so it installs
+# from npm rather than apt - there is no apt/dnf/apk repo for it the way there
+# is for Claude Code above. https://github.com/deepseek-ai/deepseek-harness
+#
+# Still a developer preview (first released 2026-08-13): compatibility-breaking
+# changes are expected, and npm's own registry integrity checks are the only
+# verification available - there is no published signing key to pin the way the
+# apt repos above are pinned.
+if command -v npm >/dev/null 2>&1; then
+  echo "Installing/updating DeepSeek Harness..."
+  npm install -g @deepseek-ai/dsh \
+    || echo "WARNING: could not install DeepSeek Harness. Everything else is unaffected."
+else
+  echo "Note: npm is not available - skipping DeepSeek Harness."
 fi
 
 # --- Chromium ----------------------------------------------------------------

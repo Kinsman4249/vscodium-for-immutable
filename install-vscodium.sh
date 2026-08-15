@@ -8,8 +8,9 @@
 # podman, installs VSCodium from its official apt repository inside it, and
 # writes a launcher plus a .desktop entry on the host so it shows up in your
 # app grid and runs like a native app. git, the GitHub CLI (gh), the lint
-# toolchain, and Claude Code are installed in the same container, so VSCodium's
-# source control and any terminal/agent workflows have them on PATH.
+# toolchain, and DeepSeek Harness are installed in the same container, so
+# VSCodium's source control and any terminal/agent workflows have them on PATH.
+# Claude Code is available too, but only if you pass --claude - see below.
 #
 # WHAT THE CONTAINER CAN REACH ON THE HOST - this is the whole point of the
 # script, so it is stated exactly. Three bind mounts, plus /dev/dri if present,
@@ -17,8 +18,8 @@
 #
 #   1. the directory you pass to --repos-dir, read-write
 #   2. the container's own private home (settings, extensions, dotfiles,
-#      Claude Code auth), which lives under ~/.local/state and is used by
-#      nothing else on the host
+#      DeepSeek Harness / Claude Code auth), which lives under ~/.local/state
+#      and is used by nothing else on the host
 #   3. the X11 socket (XWayland), read-only, so a window can be drawn. Native
 #      Wayland is available via --wayland but is not the default - see the
 #      Wayland note in README.md
@@ -62,6 +63,9 @@
 #   ./install-vscodium.sh --publish PORT    publish a container port on the
 #                                            host loopback (creation only,
 #                                            repeatable)
+#   ./install-vscodium.sh --claude          also install Claude Code. Off by
+#                                            default - DeepSeek Harness is
+#                                            installed either way
 #   ./install-vscodium.sh --debug           same, but print every command run
 #   ./install-vscodium.sh --help            show this help
 #
@@ -71,7 +75,7 @@ set -euo pipefail
 
 # Bump this whenever the script's install logic changes. Only shown in --debug
 # output, so you can tell which version produced a given log.
-BUILD="2026.08.13-1"
+BUILD="2026.08.15-1"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
@@ -84,10 +88,10 @@ PROVISION_SCRIPT="${SCRIPT_DIR}/provision-container.sh"
 # canonical paths, so resolve it once here.
 HOME_REAL="$(realpath -e "$HOME")"
 
-# The container's private home (settings, dotfiles, extensions, Claude Code
-# auth). Mounted into the container at the same path the host home has, so that
-# `~` and absolute paths behave normally inside - but the contents are this
-# directory, not your host home.
+# The container's private home (settings, dotfiles, extensions, DeepSeek
+# Harness / Claude Code auth). Mounted into the container at the same path the
+# host home has, so that `~` and absolute paths behave normally inside - but
+# the contents are this directory, not your host home.
 CONTAINER_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/vscodium-box/home"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vscodium-box"
 CONFIG_FILE="${CONFIG_DIR}/repos-dir"
@@ -112,6 +116,7 @@ USE_X11=1
 GPU_FLAG_GIVEN=0
 X11_FLAG_GIVEN=0
 PUBLISH_PORTS=()
+WITH_CLAUDE=0
 
 die() {
   echo "Error: $*" >&2
@@ -155,6 +160,10 @@ while [ $# -gt 0 ]; do
       PUBLISH_PORTS+=("${1#*=}")
       shift
       ;;
+    --claude)
+      WITH_CLAUDE=1
+      shift
+      ;;
     --repos-dir)
       REPOS_DIR="${2:-}"
       [ -n "$REPOS_DIR" ] || die "--repos-dir requires a path argument."
@@ -165,7 +174,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,73p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -417,6 +426,7 @@ provision_container() {
     --env "BOX_GID=$(id -g)" \
     --env "BOX_HOME=${HOME_REAL}" \
     --env "BOX_DEBUG=${DEBUG}" \
+    --env "BOX_WITH_CLAUDE=${WITH_CLAUDE}" \
     "$CONTAINER_NAME" bash -s < "$PROVISION_SCRIPT"
 }
 
@@ -537,8 +547,13 @@ do_install() {
 
   echo
   echo "Done. VSCodium should now appear in your application launcher."
-  echo "git, gh, the lint toolchain and Claude Code are installed inside the container too."
-  echo "Run 'claude' in VSCodium's terminal and log in on first use."
+  echo "git, gh, the lint toolchain and DeepSeek Harness are installed inside the container too."
+  echo "Run 'dsh web' in VSCodium's terminal and log in on first use."
+  if [ "$WITH_CLAUDE" -eq 1 ]; then
+    echo "Claude Code is installed too - run 'claude' and log in on first use."
+  else
+    echo "Claude Code was not installed; re-run with --claude to add it."
+  fi
   echo "Re-run this script any time to update everything."
 }
 

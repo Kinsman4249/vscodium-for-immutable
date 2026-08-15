@@ -6,10 +6,11 @@ install `.deb`/`.rpm` packages onto the base OS.
 
 It installs **VSCodium** from its official `.deb` package into a rootless
 **podman** container, along with the tools you actually need next to an editor:
-**git**, the **GitHub CLI**, **Claude Code**, **Chromium**, and a lint
-toolchain (**shellcheck**, **actionlint**, **jq**, **fd**, **yamllint**). The
-script then writes a launcher and a `.desktop` entry on the host, so the
-editor starts from the app grid like any native app.
+**git**, the **GitHub CLI**, **DeepSeek Harness**, **Chromium**, and a lint
+toolchain (**shellcheck**, **actionlint**, **jq**, **fd**, **yamllint**).
+**Claude Code** is available too, opt-in via `--claude`. The script then
+writes a launcher and a `.desktop` entry on the host, so the editor starts
+from the app grid like any native app.
 
 Because VSCodium's integrated terminal runs inside that container, everything
 the script installs is already on PATH there. That is the point of the design:
@@ -86,7 +87,7 @@ Every path from the container to the host is one of these, and nothing else:
 | Mount/device | Mode | Why | On by default? |
 | --- | --- | --- | --- |
 | your `--repos-dir` | read-write | the code you actually want to edit | yes, required |
-| `~/.local/state/vscodium-box/home` | read-write | the container's private home: settings, extensions, dotfiles, Claude Code auth | yes |
+| `~/.local/state/vscodium-box/home` | read-write | the container's private home: settings, extensions, dotfiles, DeepSeek Harness / Claude Code auth | yes |
 | the X11 socket (XWayland) | read-only | so a window can be drawn | yes |
 | `/dev/dri` | read-write | GPU-accelerated rendering instead of software fallback | yes, if present (pass `--no-gpu` to opt out) |
 | the Wayland socket | read-only | native Wayland instead of XWayland | no (pass `--wayland`; see [Wayland note](#wayland-note)) |
@@ -127,8 +128,8 @@ None of this makes the container safe to run untrusted code in - it makes the
 blast radius small and explicit. Everything the container *can* reach, assume
 a hostile process inside it can and will abuse: it can rewrite anything in
 your repos directory, including git history and hooks, and can use whatever
-credentials live in its private home (Claude Code's auth, `gh`'s token). What
-scoping the mounts buys you is that a compromise stops there - it does not
+credentials live in its private home (DeepSeek Harness's / Claude Code's auth,
+`gh`'s token). What scoping the mounts buys you is that a compromise stops there - it does not
 also get your dotfiles, your SSH keys, your other repos, your other devices,
 or a route back out to the rest of the host.
 
@@ -154,21 +155,28 @@ or a route back out to the rest of the host.
    channel), rather than the `curl | bash` one-liner the
    [docs](https://code.claude.com/docs/en/setup) lead with, so it is pinned to
    a signing key like everything else here and upgrades with the rest of the
-   container. Run `claude` in VSCodium's terminal and log in on first use.
-7. Installs **Chromium** from Debian's own repo (no extra signing key needed
+   container - but only if `--claude` was passed. Off by default. Run `claude`
+   in VSCodium's terminal and log in on first use.
+7. Installs **Node.js and npm** from Debian's own repo (no extra signing key
+   needed for that one), then installs **DeepSeek Harness**
+   (`@deepseek-ai/dsh`) from npm - it's Node-based and has no apt/dnf/apk repo
+   of its own. This is the default agent harness; still a developer preview,
+   so expect breaking changes upstream. Run `dsh web` in VSCodium's terminal
+   and log in on first use.
+8. Installs **Chromium** from Debian's own repo (no extra signing key needed
    for that one). This is a plain browser for sites that gate login behind a
    WebAuthn/passkey prompt handled entirely in-browser JS - it does not wire
    up a physical security key (YubiKey/FIDO2 USB), since that would need
    `/dev/hidraw` or `/dev/bus/usb` passed into the container, which this
    script does not do.
-8. Writes a launcher at `~/.local/bin/vscodium-box` and a `.desktop` entry at
+9. Writes a launcher at `~/.local/bin/vscodium-box` and a `.desktop` entry at
    `~/.local/share/applications/vscodium-box.desktop` on the host. Neither is
    reachable from inside the container, so a process in there cannot rewrite
    the thing you click on.
-9. Adds `--disable-gpu-compositing` to the launcher's command line
+10. Adds `--disable-gpu-compositing` to the launcher's command line
    unconditionally, and `--disable-gpu` too if `/dev/dri` isn't available (or
    `--no-gpu` was passed). See [GPU note](#gpu-note) below.
-10. Installs VSCodium's icon into the host's `hicolor` icon theme
+11. Installs VSCodium's icon into the host's `hicolor` icon theme
    (`~/.local/share/icons/hicolor/512x512/apps/vscodium.png`) and points the
    launcher's `Icon=` at it by name, so it shows up correctly in both the
    app grid/start menu and the taskbar/dock (an earlier version pointed
@@ -197,6 +205,10 @@ comments:
   from the same URL the install instructions point at, so the pin here is
   **change detection, not an independent trust anchor**. It catches a later key
   rotation or a tampered response; it cannot tell you the key was ever right.
+- **DeepSeek Harness**: installed from npm, not an apt repo, so there is no
+  signing key to pin here at all - npm's own registry integrity checks are the
+  only verification. It is also a fresh developer preview (first released
+  2026-08-13), so treat it accordingly.
 
 ## Prerequisites
 
@@ -205,8 +217,9 @@ comments:
 - An X11 or XWayland session (the default), or a Wayland session if you're
   going to pass `--wayland` - see the [Wayland note](#wayland-note) first.
 - Network access to `download.vscodium.com`, `gitlab.com`, `cli.github.com`,
-  `downloads.claude.ai`, `github.com` (the actionlint release binary), and
-  Debian's mirrors.
+  `registry.npmjs.org` (DeepSeek Harness), `github.com` (the actionlint
+  release binary), Debian's mirrors, and, if you pass `--claude`,
+  `downloads.claude.ai`.
 
 ## Usage
 
@@ -218,6 +231,7 @@ Run these from a **host** terminal:
 ./install-vscodium.sh --wayland              # use native Wayland instead of XWayland
 ./install-vscodium.sh --no-gpu               # force software rendering
 ./install-vscodium.sh --publish 3000         # publish a port on 127.0.0.1
+./install-vscodium.sh --claude               # also install Claude Code
 ./install-vscodium.sh --debug                # print every command run
 ./install-vscodium.sh --help                 # show help
 
@@ -241,10 +255,12 @@ would defeat the point. `--repos-dir`, `--wayland`, `--no-gpu`/`--gpu` and
 still accepted - they're just the defaults now, kept as no-ops so old habits
 and scripts don't break.)
 
-Re-running the installer updates VSCodium (and git/gh, Claude Code, Chromium,
-and the lint toolchain) in place. Claude Code installed from apt does not update itself,
-so a re-run is how it moves forward. actionlint is skipped on a re-run if the
-pinned version is already installed, so repeat runs stay cheap.
+Re-running the installer updates VSCodium (and git/gh, DeepSeek Harness,
+Chromium, and the lint toolchain) in place. Pass `--claude` again on a re-run
+to also update Claude Code - it isn't remembered between runs, unlike
+`--repos-dir`. Neither Claude Code (apt) nor DeepSeek Harness (npm) update
+themselves, so a re-run is how they move forward. actionlint is skipped on a
+re-run if the pinned version is already installed, so repeat runs stay cheap.
 
 ### Migrating from the Distrobox versions
 
@@ -333,8 +349,9 @@ repos directory pointing at `~/.ssh` dangles.
 
 Finally, launch VSCodium from the app grid and check that the icon appears in
 the taskbar and that its integrated terminal has `git`, `gh`, `actionlint`,
-`fd`, and `claude` (check with `claude --version`) - then that
-`./uninstall-vscodium.sh` tears everything down cleanly.
+`fd`, and `dsh` (check with `dsh --version`) - and, if you passed `--claude`,
+`claude` (`claude --version`) too - then that `./uninstall-vscodium.sh` tears
+everything down cleanly.
 
 ## License
 
