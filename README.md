@@ -173,14 +173,20 @@ or a route back out to the rest of the host.
    `~/.local/share/applications/vscodium-box.desktop` on the host. Neither is
    reachable from inside the container, so a process in there cannot rewrite
    the thing you click on.
-10. Adds `--disable-gpu-compositing` to the launcher's command line
-   unconditionally, and `--disable-gpu` too if `/dev/dri` isn't available (or
-   `--no-gpu` was passed). See [GPU note](#gpu-note) below.
-11. Installs VSCodium's icon into the host's `hicolor` icon theme
-   (`~/.local/share/icons/hicolor/512x512/apps/vscodium.png`) and points the
-   launcher's `Icon=` at it by name, so it shows up correctly in both the
-   app grid/start menu and the taskbar/dock (an earlier version pointed
-   `Icon=` at an absolute file path, which most taskbars can't resolve).
+10. Writes a second launcher/`.desktop` pair the same way -
+    `~/.local/bin/vscodium-box-console` and `vscodium-box Console` in your app
+    grid - that drops into a raw shell in the container instead of starting
+    VSCodium. Useful for checking what a CLI tool installed inside the
+    container (Cline, Kilo Code, DeepSeek Harness, etc.) actually sees,
+    without going through the editor's integrated terminal.
+11. Adds `--disable-gpu-compositing` to the launcher's command line
+    unconditionally, and `--disable-gpu` too if `/dev/dri` isn't available (or
+    `--no-gpu` was passed). See [GPU note](#gpu-note) below.
+12. Installs VSCodium's icon into the host's `hicolor` icon theme
+    (`~/.local/share/icons/hicolor/512x512/apps/vscodium.png`) and points the
+    launcher's `Icon=` at it by name, so it shows up correctly in both the
+    app grid/start menu and the taskbar/dock (an earlier version pointed
+    `Icon=` at an absolute file path, which most taskbars can't resolve).
 
 ### Signing key trust
 
@@ -350,8 +356,10 @@ repos directory pointing at `~/.ssh` dangles.
 Finally, launch VSCodium from the app grid and check that the icon appears in
 the taskbar and that its integrated terminal has `git`, `gh`, `actionlint`,
 `fd`, and `dsh` (check with `dsh --version`) - and, if you passed `--claude`,
-`claude` (`claude --version`) too - then that `./uninstall-vscodium.sh` tears
-everything down cleanly.
+`claude` (`claude --version`) too. Launch "vscodium-box Console" from the app
+grid too and check that it opens a bare shell in the same container (`echo
+$HOME` should print the container's real home path, not start VSCodium).
+Then confirm that `./uninstall-vscodium.sh` tears everything down cleanly.
 
 ## License
 

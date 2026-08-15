@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `provision-container.sh` now installs `libsecret-tools` (provides `secret-tool`), the last missing package prerequisite for `runpod-helper`'s `startup.sh`, which stores `RUNPOD_API_KEY` in the OS keyring via that binary. Everything else `runpod-helper` needs - `bash`, `ssh`, `curl`, `openssl`, `git`, `runpodctl` - was already present in the box. `secret-tool` still needs a reachable D-Bus session bus with an unlocked Secret Service to actually work at runtime, which apt can't provide; see `runpod-helper/PREREQUISITES.md`.
+- `install-vscodium.sh` now writes a second launcher/`.desktop` pair - `~/.local/bin/vscodium-box-console` and `vscodium-box Console` in the app grid - that runs `podman exec` straight into a login shell in the container instead of starting VSCodium. It shares the same env-forwarding logic as the VSCodium launcher (factored out into a new `compute_env_args` helper so both stay in sync with however the container was actually created) and uses `Terminal=true` in the `.desktop` entry so the desktop environment supplies whatever terminal emulator the user already has set as default, rather than this script hardcoding one. `uninstall-vscodium.sh` removes both new files alongside the existing ones.
 
 ## [4.0.1] - 2026-08-15
 
