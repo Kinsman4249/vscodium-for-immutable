@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-08-15
+
+### Added
+
+- `provision-container.sh` now installs Node.js and npm from Debian's own repo (no extra signing key needed, same as Chromium), then installs [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`@deepseek-ai/dsh`) from npm as the default agent harness. It is an MIT-licensed developer preview, first released 2026-08-13, with no signing key of its own to pin - npm's registry integrity checks are the only verification available. Run `dsh web` in VSCodium's terminal and log in on first use.
+- `install-vscodium.sh` gained a `--claude` flag to opt back into installing Claude Code.
+
+### Changed
+
+- Claude Code is no longer installed by default. `provision-container.sh` only sets up its signing key, apt repository, and package install when `BOX_WITH_CLAUDE=1`, which `install-vscodium.sh` sets from the new `--claude` flag. Unlike `--repos-dir`, this flag is not remembered between runs - pass it again on every run where Claude Code should be installed or updated. Existing installs that relied on a plain re-run to keep Claude Code current now need `--claude` on that re-run.
+- README.md was updated throughout to reflect DeepSeek Harness as the default agent harness and Claude Code as opt-in: the feature list, the mount table, the numbered installer-steps list, the signing-key-trust section, the prerequisites/network-access list, the usage examples, and the testing checklist.
+
 ## [3.2.0] - 2026-08-13
 
 ### Added
