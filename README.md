@@ -333,54 +333,30 @@ next run).
 
 If you use [runpod-helper](https://github.com/Kinsman4249/runpod-helper) to
 run a self-hosted model and talk to it from Kilo Code or opencode inside
-vscodium-box, its `startup.sh` prints a fresh `baseURL` and a one-off `apiKey`
-on every launch - by design, neither is stored anywhere, and there's no
-stable pod hostname to hardcode. Kilo's and opencode's configs keep whatever
-they were last pointed at, so after a pod is torn down and a new one
-launched, both are left talking to a dead endpoint until something updates
-their config files - which, left alone, shows up as escalating tool-call/path
-corruption in their output rather than a clear connection error.
+vscodium-box, its `startup.sh` now asks after every launch whether to push
+the fresh `baseURL`/`apiKey`/model straight into both tools' configs -
+`sync-runpod-endpoint.sh`, which lives in that repo (see its README's
+"Syncing into vscodium-box" section), not here.
 
-`sync-runpod-endpoint.sh` closes that gap: pipe a `startup.sh` launch straight
-into it (or point it at a saved log with `--log`) and it extracts the
-endpoint, API key, and model name and writes them into both
-`~/.local/state/vscodium-box/home/.config/kilo/kilo.jsonc` and
-`.../opencode/opencode.jsonc` on the host, which *are* the container's
-`~/.config/kilo/kilo.jsonc` and `~/.config/opencode/opencode.jsonc` (that
-whole directory is a straight bind mount - see [What the container can and
-cannot reach](#what-the-container-can-and-cannot-reach)). No running
-container or `podman exec` needed, and fields it doesn't know about (extra
-models, your `permission` block) are left alone.
-
-```bash
-./startup.sh | ./sync-runpod-endpoint.sh          # from runpod-helper's directory
-./sync-runpod-endpoint.sh --log launch.log        # or from a saved log file
-./sync-runpod-endpoint.sh --container-home DIR    # target a different container's
-                                                   # private home instead of vscodium-box's
-```
-
-vscodium-box is the default target, but nothing about the script is specific
-to it - it just needs a private home directory laid out the way
-`install-vscodium.sh` lays one out (`.config/kilo/`, `.config/opencode/`
-under a directory bind-mounted to a container's `~`). `--container-home`
-points it at any other one, e.g. a second container built the same way.
-
-Only Kilo Code and opencode are wired up - they're the only two of
-Kilo/Cline/Roo/opencode actually installed in this container. Cline and Roo
-use the same `provider.<name>.options.{baseURL,apiKey}` shape in their own
-settings files, so if you install one and hit the same staleness problem, add
-its config path to the `CONFIGS` array in the script.
+What makes that possible is this project's own layout: `~/.config/kilo/` and
+`~/.config/opencode/` inside vscodium-box are not really inside the
+container at all. They live under vscodium-box's private home on the host
+(`~/.local/state/vscodium-box/home/.config/...`), which is a straight bind
+mount - see [What the container can and cannot reach](#what-the-container-can-and-cannot-reach).
+Editing the host copy edits the container's copy directly, no `podman exec`
+or running container needed, which is exactly what lets a script in another
+repo update those configs on its own.
 
 ## Testing changes
 
-There are four scripts: `install-vscodium.sh`, `uninstall-vscodium.sh` and
-`sync-runpod-endpoint.sh` run on the host, and `provision-container.sh` is
-piped into the container as root. Check all four - the installer provides
-shellcheck itself, so there is no excuse to skip it:
+There are three scripts: `install-vscodium.sh` and `uninstall-vscodium.sh` run
+on the host, and `provision-container.sh` is piped into the container as root.
+Check all three - the installer provides shellcheck itself, so there is no
+excuse to skip it:
 
 ```bash
-bash -n install-vscodium.sh uninstall-vscodium.sh sync-runpod-endpoint.sh provision-container.sh
-shellcheck install-vscodium.sh uninstall-vscodium.sh sync-runpod-endpoint.sh provision-container.sh
+bash -n install-vscodium.sh uninstall-vscodium.sh provision-container.sh
+shellcheck install-vscodium.sh uninstall-vscodium.sh provision-container.sh
 ```
 
 Then, from a host terminal, install against a throwaway directory first and
