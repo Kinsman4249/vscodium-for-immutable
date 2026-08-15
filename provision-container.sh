@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever this script's logic changes. Shown in --debug output so you
 # can tell which version produced a given log.
-BUILD="2026.08.15-2"
+BUILD="2026.08.15-3"
 
 if [ "${BOX_DEBUG:-0}" = "1" ]; then
   echo "[debug] provision-container.sh build $BUILD"
@@ -293,6 +293,41 @@ if [ "${BOX_WITH_CLAUDE:-0}" = "1" ]; then
   fi
 fi
 
+# --- Node.js apt repository (NodeSource) -------------------------------------
+# DeepSeek Harness (below) needs Node.js >=24.0.0: its dsh-app-boot dependency
+# imports util.parseEnv, added to Node.js in v24.0.0
+# (https://nodejs.org/api/util.html#utilparseenvcontent), and dsh's own
+# package.json declares "engines": {"node": "^22.19.0 || >=24.0.0"} - so 24.x
+# is the version actually required either way. Debian 12's own main repo only
+# carries Node.js 18.19, three majors short - confirmed live, that mismatch is
+# exactly what crashed every `dsh` invocation with "The requested module
+# 'node:util' does not provide an export named 'parseEnv'". So, unlike
+# Chromium below (Debian's own package is fine there), Node.js needs its own
+# signed apt repo the same way VSCodium/gh/Claude Code above do.
+#
+# Official method: https://github.com/nodesource/distributions/wiki/Repository-Manual-Installation
+# NodeSource does not publish this key's fingerprint anywhere the way GitHub
+# and Anthropic do above, so - like VSCodium's key above - this pin is change
+# detection, not an independent trust anchor.
+NODESOURCE_KEYRING="/etc/apt/keyrings/nodesource.gpg"
+NODESOURCE_FINGERPRINTS="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
+NODE_MAJOR=24
+if [ ! -f "$NODESOURCE_KEYRING" ]; then
+  echo "Installing the NodeSource signing key..."
+  if install_signing_key \
+      https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      "$NODESOURCE_KEYRING" "$NODESOURCE_FINGERPRINTS" dearmor; then
+    :
+  else
+    echo "WARNING: could not install a trusted NodeSource signing key (download failed, or the key did not match the expected fingerprint) - skipping Node.js and DeepSeek Harness."
+  fi
+fi
+if [ -f "$NODESOURCE_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/nodesource.list ]; then
+  echo "Registering the NodeSource apt repository (Node.js ${NODE_MAJOR}.x)..."
+  echo "deb [signed-by=${NODESOURCE_KEYRING}] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list
+fi
+
 # --- packages ---------------------------------------------------------------
 
 echo "Installing/updating the lint toolchain..."
@@ -309,12 +344,17 @@ echo "Installing/updating libsecret-tools..."
 apt-get install -y libsecret-tools \
   || echo "WARNING: could not install libsecret-tools. runpod-helper's secret-tool step will be skipped."
 
-# Node.js + npm: prereq for DeepSeek Harness (below). Debian 12's own main repo
-# carries a recent-enough LTS build, so - like Chromium further down - this
-# needs no separate signing key or apt source.
+# Node.js: prereq for DeepSeek Harness (below). Installed from the NodeSource
+# repo registered above - see that section for why Debian's own package is
+# too old. npm ships bundled with NodeSource's nodejs package, so there is no
+# separate npm package to install here (unlike the old Debian-package setup).
 echo "Installing/updating Node.js..."
-apt-get install -y nodejs npm \
-  || echo "WARNING: could not install Node.js. DeepSeek Harness will be skipped."
+if [ -f /etc/apt/sources.list.d/nodesource.list ]; then
+  apt-get install -y nodejs \
+    || echo "WARNING: could not install Node.js. DeepSeek Harness will be skipped."
+else
+  echo "Note: the NodeSource apt repository isn't registered - skipping Node.js and DeepSeek Harness."
+fi
 
 # VSCodium and gh each get their own install call, so that one repository having
 # a bad day cannot take the others down with it.
@@ -351,6 +391,18 @@ if command -v npm >/dev/null 2>&1; then
   echo "Installing/updating DeepSeek Harness..."
   npm install -g @deepseek-ai/dsh \
     || echo "WARNING: could not install DeepSeek Harness. Everything else is unaffected."
+  # The global package itself lands under /usr/local/lib/node_modules
+  # (root-owned by design), but npm's cache always lives under $HOME, and
+  # $HOME here is BOX_HOME - the container's env default (see HOME= in
+  # install-vscodium.sh's `podman create`), not root's own /root. Since this
+  # whole script runs as root, that means every npm invocation above just
+  # wrote cache/log files into the box user's home as root - confirmed live,
+  # 6000+ root-owned files under ~/.npm - which then EACCESs the very next
+  # `npm install` the box user runs themselves. Fix ownership unconditionally;
+  # cheap, and a no-op once it's already right.
+  if [ -d "${BOX_HOME}/.npm" ]; then
+    chown -R "${BOX_UID}:${BOX_GID}" "${BOX_HOME}/.npm"
+  fi
 else
   echo "Note: npm is not available - skipping DeepSeek Harness."
 fi

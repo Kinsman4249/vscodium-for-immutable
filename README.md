@@ -157,12 +157,13 @@ or a route back out to the rest of the host.
    a signing key like everything else here and upgrades with the rest of the
    container - but only if `--claude` was passed. Off by default. Run `claude`
    in VSCodium's terminal and log in on first use.
-7. Installs **Node.js and npm** from Debian's own repo (no extra signing key
-   needed for that one), then installs **DeepSeek Harness**
-   (`@deepseek-ai/dsh`) from npm - it's Node-based and has no apt/dnf/apk repo
-   of its own. This is the default agent harness; still a developer preview,
-   so expect breaking changes upstream. Run `dsh web` in VSCodium's terminal
-   and log in on first use.
+7. Installs **Node.js 24.x** from NodeSource's signed apt repository (Debian
+   12's own repo only carries 18.19, three majors short of what DeepSeek
+   Harness actually needs - see [Signing key trust](#signing-key-trust)),
+   then installs **DeepSeek Harness** (`@deepseek-ai/dsh`) from npm - it's
+   Node-based and has no apt/dnf/apk repo of its own. This is the default
+   agent harness; still a developer preview, so expect breaking changes
+   upstream. Run `dsh web` in VSCodium's terminal and log in on first use.
 8. Installs **Chromium** from Debian's own repo (no extra signing key needed
    for that one). This is a plain browser for sites that gate login behind a
    WebAuthn/passkey prompt handled entirely in-browser JS - it does not wire
@@ -190,7 +191,7 @@ or a route back out to the rest of the host.
 
 ### Signing key trust
 
-All three apt repositories are pinned to a dedicated keyring with `signed-by`,
+All four apt repositories are pinned to a dedicated keyring with `signed-by`,
 **and** the key's primary fingerprints are checked before the key is installed.
 The check requires that *every* primary key in the downloaded file is one this
 script expects, so an extra key cannot be smuggled into a file that still
@@ -211,6 +212,8 @@ comments:
   from the same URL the install instructions point at, so the pin here is
   **change detection, not an independent trust anchor**. It catches a later key
   rotation or a tampered response; it cannot tell you the key was ever right.
+- **NodeSource** (Node.js): same story as VSCodium - no published fingerprint,
+  so this pin is change detection only, not an independent trust anchor.
 - **DeepSeek Harness**: installed from npm, not an apt repo, so there is no
   signing key to pin here at all - npm's own registry integrity checks are the
   only verification. It is also a fresh developer preview (first released
@@ -223,9 +226,9 @@ comments:
 - An X11 or XWayland session (the default), or a Wayland session if you're
   going to pass `--wayland` - see the [Wayland note](#wayland-note) first.
 - Network access to `download.vscodium.com`, `gitlab.com`, `cli.github.com`,
-  `registry.npmjs.org` (DeepSeek Harness), `github.com` (the actionlint
-  release binary), Debian's mirrors, and, if you pass `--claude`,
-  `downloads.claude.ai`.
+  `deb.nodesource.com` (Node.js), `registry.npmjs.org` (DeepSeek Harness),
+  `github.com` (the actionlint release binary), Debian's mirrors, and, if you
+  pass `--claude`, `downloads.claude.ai`.
 
 ## Usage
 
@@ -326,16 +329,58 @@ correctly without the compositing flag, remove that token from the
 `write_launcher` in `install-vscodium.sh` (otherwise it's re-applied on the
 next run).
 
-## Testing changes
+## Syncing a runpod-helper pod into Kilo Code and opencode
 
-There are three scripts: `install-vscodium.sh` and `uninstall-vscodium.sh` run
-on the host, and `provision-container.sh` is piped into the container as root.
-Check all three - the installer provides shellcheck itself, so there is no
-excuse to skip it:
+If you use [runpod-helper](https://github.com/Kinsman4249/runpod-helper) to
+run a self-hosted model and talk to it from Kilo Code or opencode inside
+vscodium-box, its `startup.sh` prints a fresh `baseURL` and a one-off `apiKey`
+on every launch - by design, neither is stored anywhere, and there's no
+stable pod hostname to hardcode. Kilo's and opencode's configs keep whatever
+they were last pointed at, so after a pod is torn down and a new one
+launched, both are left talking to a dead endpoint until something updates
+their config files - which, left alone, shows up as escalating tool-call/path
+corruption in their output rather than a clear connection error.
+
+`sync-runpod-endpoint.sh` closes that gap: pipe a `startup.sh` launch straight
+into it (or point it at a saved log with `--log`) and it extracts the
+endpoint, API key, and model name and writes them into both
+`~/.local/state/vscodium-box/home/.config/kilo/kilo.jsonc` and
+`.../opencode/opencode.jsonc` on the host, which *are* the container's
+`~/.config/kilo/kilo.jsonc` and `~/.config/opencode/opencode.jsonc` (that
+whole directory is a straight bind mount - see [What the container can and
+cannot reach](#what-the-container-can-and-cannot-reach)). No running
+container or `podman exec` needed, and fields it doesn't know about (extra
+models, your `permission` block) are left alone.
 
 ```bash
-bash -n install-vscodium.sh uninstall-vscodium.sh provision-container.sh
-shellcheck install-vscodium.sh uninstall-vscodium.sh provision-container.sh
+./startup.sh | ./sync-runpod-endpoint.sh          # from runpod-helper's directory
+./sync-runpod-endpoint.sh --log launch.log        # or from a saved log file
+./sync-runpod-endpoint.sh --container-home DIR    # target a different container's
+                                                   # private home instead of vscodium-box's
+```
+
+vscodium-box is the default target, but nothing about the script is specific
+to it - it just needs a private home directory laid out the way
+`install-vscodium.sh` lays one out (`.config/kilo/`, `.config/opencode/`
+under a directory bind-mounted to a container's `~`). `--container-home`
+points it at any other one, e.g. a second container built the same way.
+
+Only Kilo Code and opencode are wired up - they're the only two of
+Kilo/Cline/Roo/opencode actually installed in this container. Cline and Roo
+use the same `provider.<name>.options.{baseURL,apiKey}` shape in their own
+settings files, so if you install one and hit the same staleness problem, add
+its config path to the `CONFIGS` array in the script.
+
+## Testing changes
+
+There are four scripts: `install-vscodium.sh`, `uninstall-vscodium.sh` and
+`sync-runpod-endpoint.sh` run on the host, and `provision-container.sh` is
+piped into the container as root. Check all four - the installer provides
+shellcheck itself, so there is no excuse to skip it:
+
+```bash
+bash -n install-vscodium.sh uninstall-vscodium.sh sync-runpod-endpoint.sh provision-container.sh
+shellcheck install-vscodium.sh uninstall-vscodium.sh sync-runpod-endpoint.sh provision-container.sh
 ```
 
 Then, from a host terminal, install against a throwaway directory first and
