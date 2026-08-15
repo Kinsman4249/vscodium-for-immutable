@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-08-15
+
+### Fixed
+
+- `provision-container.sh` now appends `LANG=C.UTF-8` and `LC_ALL=C.UTF-8` to `/etc/bash.bashrc` inside the container, if not already present. Debian's minimal image leaves both unset, which falls back to the POSIX/C locale and breaks tools that assume a Unicode-aware locale - for example, a `grep -P` matching emoji by codepoint range errored out under it instead of just finding no matches. glibc has shipped the `C.UTF-8` locale built in since 2.35, so no `locales` package or `locale-gen` is needed. This is a shell default rather than a container-level `podman create --env` because the thing that needs it - VSCodium's integrated terminal and anything launched from it - runs as a non-login interactive shell, and Debian's bash always sources `/etc/bash.bashrc` for those regardless of the container-creation-time environment.
+
 ## [4.0.0] - 2026-08-15
 
 ### Added
