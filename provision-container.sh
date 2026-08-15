@@ -274,6 +274,16 @@ echo "Installing/updating the lint toolchain..."
 apt-get update -qq
 apt-get install -y shellcheck jq fd-find yamllint
 
+# libsecret-tools: provides the `secret-tool` binary that runpod-helper's
+# startup.sh uses to store RUNPOD_API_KEY in the OS keyring instead of a
+# plaintext file. Needs a reachable D-Bus session bus with an unlocked Secret
+# Service (GNOME Keyring/KWallet) to actually work - not something apt can
+# provide - so this only satisfies the package prerequisite; see
+# runpod-helper/PREREQUISITES.md for the D-Bus caveat.
+echo "Installing/updating libsecret-tools..."
+apt-get install -y libsecret-tools \
+  || echo "WARNING: could not install libsecret-tools. runpod-helper's secret-tool step will be skipped."
+
 # Node.js + npm: prereq for DeepSeek Harness (below). Debian 12's own main repo
 # carries a recent-enough LTS build, so - like Chromium further down - this
 # needs no separate signing key or apt source.
