@@ -128,6 +128,20 @@ if ! grep -q '^export LANG=C.UTF-8$' /etc/bash.bashrc 2>/dev/null; then
   } >> /etc/bash.bashrc
 fi
 
+# --- opencode -----------------------------------------------------------------
+# opencode installs itself to ~/.opencode/bin but doesn't put itself on PATH.
+# Same reasoning as the locale block above: append to /etc/bash.bashrc so every
+# interactive shell (including VSCodium's integrated terminal) picks it up
+# without needing the container recreated.
+if ! grep -q '^export PATH=.*\.opencode/bin' /etc/bash.bashrc 2>/dev/null; then
+  echo "Adding opencode to PATH..."
+  {
+    echo ''
+    echo '# vscodium-box: put opencode on PATH (see provision-container.sh)'
+    echo "export PATH=${BOX_HOME}/.opencode/bin:\$PATH"
+  } >> /etc/bash.bashrc
+fi
+
 # --- container user ---------------------------------------------------------
 #
 # The debian:12 image has no account for the host user's uid. Without one,
