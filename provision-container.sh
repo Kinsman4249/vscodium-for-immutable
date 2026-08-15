@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever this script's logic changes. Shown in --debug output so you
 # can tell which version produced a given log.
-BUILD="2026.08.15-3"
+BUILD="2026.08.15-4"
 
 if [ "${BOX_DEBUG:-0}" = "1" ]; then
   echo "[debug] provision-container.sh build $BUILD"
@@ -389,7 +389,31 @@ fi
 # apt repos above are pinned.
 if command -v npm >/dev/null 2>&1; then
   echo "Installing/updating DeepSeek Harness..."
-  npm install -g @deepseek-ai/dsh \
+  # Two npm quirks, both confirmed live, that a plain `npm install -g` silently
+  # falls over on:
+  #
+  # 1. npm 11.16+ (shipped in the Node 24.x installed above) gates every
+  #    dependency's install-time lifecycle scripts behind an explicit
+  #    allowlist by default - part of npm v12's supply-chain hardening
+  #    (https://github.blog/changelog/2026-06-09-upcoming-breaking-changes-for-npm-v12/).
+  #    Unlisted packages have their scripts *skipped with a warning*, not
+  #    failed outright, so the install reports success while node-pty's
+  #    postinstall (which compiles its native pty.node binding) never runs -
+  #    every `dsh` invocation then crashes at plugin-boot with "Cannot find
+  #    module './prebuilds/linux-x64//pty.node'". The five names below are
+  #    exactly what npm itself names as pending when you hit this ("N
+  #    packages have install scripts not yet covered by allowScripts"), sized
+  #    to this DeepSeek Harness release - if a future dsh version adds a new
+  #    native dependency, expect the same failure mode until it's added here
+  #    too.
+  # 2. Separately, sharp's own platform-specific optional dependency
+  #    (@img/sharp-linux-x64) doesn't reliably get pulled by a global
+  #    install - a long-standing npm bug resolving nested optionalDependencies
+  #    under `-g`. --include=optional is sharp's own documented workaround
+  #    (https://sharp.pixelplumbing.com/install#cross-platform).
+  npm install -g --include=optional \
+    --allow-scripts=koffi,node-pty,protobufjs,@deepseek-ai/dsh-subprocess-local,@google/genai \
+    @deepseek-ai/dsh \
     || echo "WARNING: could not install DeepSeek Harness. Everything else is unaffected."
   # The global package itself lands under /usr/local/lib/node_modules
   # (root-owned by design), but npm's cache always lives under $HOME, and

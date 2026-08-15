@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `provision-container.sh`'s DeepSeek Harness install (`npm install -g @deepseek-ai/dsh`) silently produced a broken `dsh` - every invocation crashed at plugin-boot, confirmed live, with two stacked native-module failures: `node-pty`'s postinstall (which compiles its `pty.node` binding) never ran, and `sharp` ended up with the wrong-platform optional package instead of `@img/sharp-linux-x64`. Root cause of the first: npm 11.16+ (shipped in the Node 24.x installed above it) gates every dependency's install-time lifecycle scripts behind an explicit allowlist by default, part of npm v12's supply-chain hardening ([GitHub changelog](https://github.blog/changelog/2026-06-09-upcoming-breaking-changes-for-npm-v12/)); unlisted packages have scripts skipped with a warning, not a failure, so the install reported success while `node-pty` stayed uncompiled. The second is a long-standing npm bug resolving nested `optionalDependencies` under a global install. Fixed by adding `--include=optional` (sharp's own documented workaround) and an explicit `--allow-scripts=koffi,node-pty,protobufjs,@deepseek-ai/dsh-subprocess-local,@google/genai` (the five packages npm itself names as pending) to the install command. Verified live: a clean uninstall/reinstall through this fixed script now boots `dsh --profile headless` straight through to the expected `MISSING_CREDENTIAL` prompt, with no native-module errors.
+
 ## [5.0.0] - 2026-08-15
 
 ### Changed
