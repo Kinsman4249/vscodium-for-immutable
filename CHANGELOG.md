@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-08-15
+
+### Changed
+
+- README.md now points to runpod-helper's own `startup.sh` (which offers to run the sync automatically after every launch) instead of documenting `sync-runpod-endpoint.sh` directly, while keeping this repo's explanation of why the sync works at all: `~/.config/kilo/` and `~/.config/opencode/` inside vscodium-box are a straight bind mount of a host directory, not really "inside" the container, letting an external script edit those files without `podman exec` or a running container.
+- "Testing changes" in README.md now lists three scripts (`install-vscodium.sh`, `uninstall-vscodium.sh`, `provision-container.sh`) instead of four, matching the removal below.
+- .gitignore now also excludes `.kilo/kilo.jsonc`.
+
+### Removed
+
+- `sync-runpod-endpoint.sh`, moved to the [runpod-helper](https://github.com/Kinsman4249/runpod-helper) repo, where its `startup.sh` now offers to run the equivalent sync automatically after every launch.
+
 ## [4.1.0] - 2026-08-15
 
 ### Added
