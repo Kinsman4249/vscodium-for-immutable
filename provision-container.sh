@@ -152,7 +152,18 @@ fi
 if ! getent group "$BOX_GID" >/dev/null 2>&1; then
   groupadd --gid "$BOX_GID" "$BOX_USER"
 fi
-if ! getent passwd "$BOX_UID" >/dev/null 2>&1; then
+if getent passwd "$BOX_UID" >/dev/null 2>&1; then
+  # Rootless podman's --userns=keep-id auto-injects a passwd entry for this
+  # uid before we ever get here, built from the host account but with shell
+  # forced to /bin/sh and no real home - so the entry always exists and this
+  # branch always runs. Fix it up with usermod instead of useradd.
+  existing_name="$(getent passwd "$BOX_UID" | cut -d: -f1)"
+  if [ "$existing_name" != "$BOX_USER" ]; then
+    usermod --login "$BOX_USER" "$existing_name"
+    existing_name="$BOX_USER"
+  fi
+  usermod --home "$BOX_HOME" --shell /bin/bash "$existing_name"
+else
   useradd --uid "$BOX_UID" --gid "$BOX_GID" --home-dir "$BOX_HOME" \
     --shell /bin/bash --no-create-home "$BOX_USER"
 fi
