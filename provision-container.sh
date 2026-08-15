@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever this script's logic changes. Shown in --debug output so you
 # can tell which version produced a given log.
-BUILD="2026.08.15-1"
+BUILD="2026.08.15-2"
 
 if [ "${BOX_DEBUG:-0}" = "1" ]; then
   echo "[debug] provision-container.sh build $BUILD"
@@ -102,6 +102,31 @@ apt-get update -qq
 
 echo "Ensuring base tooling (curl, gnupg, wget, ca-certificates, git, sudo) is present..."
 apt-get install -y -qq curl gnupg wget ca-certificates git sudo >/dev/null
+
+# --- locale -------------------------------------------------------------------
+# Debian's minimal image leaves LANG/LC_ALL unset, which falls back to the
+# POSIX/C locale. That breaks tools that assume a Unicode-aware locale - e.g.
+# `grep -P '[\x{1F300}-\x{1FAFF}]'` (matching emoji by codepoint, as the
+# release-gh skill's ASCII lint does) errors out under it instead of just
+# finding no matches. glibc has shipped the C.UTF-8 locale built in since
+# 2.35, so no `locales` package or `locale-gen` is needed - just point at it.
+#
+# This has to be a shell default rather than a container-level `podman create
+# --env`, because VSCodium's integrated terminal (and anything launched from
+# it, including Claude Code) is what needs the fix, and that terminal is an
+# interactive, non-login bash shell. Debian's bash package always sources
+# /etc/bash.bashrc for those, regardless of whether the user has their own
+# ~/.bashrc, so appending here reaches every shell without needing the
+# container to be recreated.
+if ! grep -q '^export LANG=C.UTF-8$' /etc/bash.bashrc 2>/dev/null; then
+  echo "Setting the default locale to C.UTF-8..."
+  {
+    echo ''
+    echo '# vscodium-box: default to a UTF-8 locale (see provision-container.sh)'
+    echo 'export LANG=C.UTF-8'
+    echo 'export LC_ALL=C.UTF-8'
+  } >> /etc/bash.bashrc
+fi
 
 # --- container user ---------------------------------------------------------
 #
