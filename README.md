@@ -187,10 +187,14 @@ or a route back out to the rest of the host.
     VSCodium. Useful for checking what a CLI tool installed inside the
     container (Cline, Kilo Code, DeepSeek Harness, etc.) actually sees,
     without going through the editor's integrated terminal.
-11. Adds `--disable-gpu-compositing` to the launcher's command line
+11. Writes a third launcher/`.desktop` pair -
+    `~/.local/bin/vscodium-box-restart` and `vscodium-box Restart` in your app
+    grid - that restarts the container. See [Fixing Permission denied inside
+    the box](#fixing-permission-denied-inside-the-box) for what it is for.
+12. Adds `--disable-gpu-compositing` to the launcher's command line
     unconditionally, and `--disable-gpu` too if `/dev/dri` isn't available (or
     `--no-gpu` was passed). See [GPU note](#gpu-note) below.
-12. Installs VSCodium's icon into the host's `hicolor` icon theme
+13. Installs VSCodium's icon into the host's `hicolor` icon theme
     (`~/.local/share/icons/hicolor/512x512/apps/vscodium.png`) and points the
     launcher's `Icon=` at it by name, so it shows up correctly in both the
     app grid/start menu and the taskbar/dock (an earlier version pointed
@@ -389,6 +393,28 @@ correctly without the compositing flag, remove that token from the
 `write_launcher` in `install-vscodium.sh` (otherwise it's re-applied on the
 next run).
 
+## Fixing Permission denied inside the box
+
+The bind mounts are marked `,z`, which makes podman relabel mounted files for
+SELinux - from `user_home_t` on the host to `container_file_t` the container
+can read. That relabel runs at **mount time**, not at file-in-place time. So a
+file you create on the host *after* the container was started (a repo you
+`git clone`, a file you drag into the mounted folder) keeps its host label,
+and the container process (`container_t`) is denied reading or even `stat`-ing
+it until the container is restarted and podman relabels the mount again.
+
+That is what you're hitting when the box says `Permission denied` on a file you
+just dropped into a mounted folder: the file *is* there, its SELinux label just
+says it isn't for the container.
+
+The **vscodium-box Restart** app-grid entry exists for exactly this: it stops
+and starts the container, re-running the `,z` relabel so host-created files
+become readable inside. The container runs `sleep infinity`, so this is quick
+and only re-relabels - it does not reinstall anything. The trade-off is that it
+also terminates the running VSCodium (and any shell session in the box), which
+is why it is an explicit app-grid action rather than something the editor
+triggers on its own.
+
 ## Syncing a runpod-helper pod into Kilo Code and opencode
 
 If you use [runpod-helper](https://github.com/Kinsman4249/runpod-helper) to
@@ -439,8 +465,12 @@ the taskbar and that its integrated terminal has `git`, `gh`, `actionlint`,
 `fd`, and `dsh` (check with `dsh --version`) - and, if you passed `--claude`,
 `claude` (`claude --version`) too. Launch "vscodium-box Console" from the app
 grid too and check that it opens a bare shell in the same container (`echo
-$HOME` should print the container's real home path, not start VSCodium).
-Then confirm that `./uninstall-vscodium.sh` tears everything down cleanly.
+$HOME` should print the container's real home path, not start VSCodium). Then
+create a new file on the host inside the mounted folder while the box is
+running and check it reads `Permission denied` from inside, then launch
+"vscodium-box Restart" and check the same file now reads fine. Then confirm
+that `./uninstall-vscodium.sh` tears down all three launcher/desktop pairs and
+the container cleanly.
 
 ## License
 

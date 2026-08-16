@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever the script's removal logic changes. Only shown in
 # --debug output, so you can tell which version produced a given log.
-BUILD="2026.08.15-1"
+BUILD="2026.08.16-1"
 
 CONTAINER_NAME="vscodium-box"
 
@@ -34,6 +34,8 @@ WRAPPER="$HOME/.local/bin/${CONTAINER_NAME}"
 DESKTOP_FILE="$HOME/.local/share/applications/${CONTAINER_NAME}.desktop"
 WRAPPER_CONSOLE="$HOME/.local/bin/${CONTAINER_NAME}-console"
 DESKTOP_FILE_CONSOLE="$HOME/.local/share/applications/${CONTAINER_NAME}-console.desktop"
+WRAPPER_RESTART="$HOME/.local/bin/${CONTAINER_NAME}-restart"
+DESKTOP_FILE_RESTART="$HOME/.local/share/applications/${CONTAINER_NAME}-restart.desktop"
 ICON_FILE="$HOME/.local/share/icons/hicolor/512x512/apps/vscodium.png"
 
 DEBUG=0
@@ -83,7 +85,8 @@ else
 fi
 
 echo "Removing the launcher and app entries from the host..."
-rm -f "$WRAPPER" "$DESKTOP_FILE" "$WRAPPER_CONSOLE" "$DESKTOP_FILE_CONSOLE" "$ICON_FILE"
+rm -f "$WRAPPER" "$DESKTOP_FILE" "$WRAPPER_CONSOLE" "$DESKTOP_FILE_CONSOLE" \
+  "$WRAPPER_RESTART" "$DESKTOP_FILE_RESTART" "$ICON_FILE"
 # Leftovers from the Distrobox-based versions of this script (pre-2.0.0).
 rm -f "$HOME/.local/share/applications/${CONTAINER_NAME}-codium.desktop"
 rm -f "$HOME/.local/share/icons/vscodium.png"
