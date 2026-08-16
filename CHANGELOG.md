@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-08-16
+
 ### Added
 
 - `provision-container.sh` now vendors the watermarks-remover HTTP service, pinned to the upstream source tarball `v0.5.0` with an explicit SHA-256 (verified before extracting; a single checksum because the archive is source, not per-arch), extracting `service/scripts/` to `/usr/local/lib/watermarks-remover/`. `libimage-exiftool-perl` and `qpdf` (Debian 12 packages) are installed alongside so PDF/container metadata strips run at full fidelity. A new root-owned `/usr/local/bin/watermarks-serve` wrapper starts the python-stdlib server on demand on `127.0.0.1:8765` when `/health` fails, polling for up to ~10 seconds. The service has to run inside the container: the box's private network namespace cannot reach a host-side 127.0.0.1 service. The `remove-ai-marks` Claude Code skill consumes this service to scrub every tracked file before a `release-gh` run (gate G1b).
