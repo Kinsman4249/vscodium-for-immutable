@@ -8,7 +8,10 @@ It installs **VSCodium** from its official `.deb` package into a rootless
 **podman** container, along with the tools you actually need next to an editor:
 **git**, the **GitHub CLI**, **DeepSeek Harness**, **Chromium**, and a lint
 toolchain (**shellcheck**, **actionlint**, **jq**, **fd**, **yamllint**).
-**Claude Code** is available too, opt-in via `--claude`. The script then
+**Claude Code** is available too, opt-in via `--claude`. A pinned
+**watermarks-remover** service (python stdlib) is installed as well - the
+`remove-ai-marks` skill scrubs against it via `curl`, with the service started
+inside the box on demand by `watermarks-serve`. The script then
 writes a launcher and a `.desktop` entry on the host, so the editor starts
 from the app grid like any native app.
 

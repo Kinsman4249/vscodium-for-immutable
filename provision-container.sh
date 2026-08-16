@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Bump this whenever this script's logic changes. Shown in --debug output so you
 # can tell which version produced a given log.
-BUILD="2026.08.15-4"
+BUILD="2026.08.16-1"
 
 if [ "${BOX_DEBUG:-0}" = "1" ]; then
   echo "[debug] provision-container.sh build $BUILD"
@@ -334,6 +334,14 @@ echo "Installing/updating the lint toolchain..."
 apt-get update -qq
 apt-get install -y shellcheck jq fd-find yamllint
 
+# exiftool and qpdf improve the PDF/container metadata strip that the
+# watermarks-remover service performs for the remove-ai-marks skill. Both are
+# plain Debian 12 main packages. Without them the service degrades on PDFs
+# (best-effort XMP strip instead of a real one) but does not break.
+echo "Installing/updating exiftool and qpdf..."
+apt-get install -y libimage-exiftool-perl qpdf \
+  || echo "WARNING: could not install exiftool/qpdf. The watermarks-remover service will degrade on PDF/container strips."
+
 # libsecret-tools: provides the `secret-tool` binary that runpod-helper's
 # startup.sh uses to store RUNPOD_API_KEY in the OS keyring instead of a
 # plaintext file. Needs a reachable D-Bus session bus with an unlocked Secret
@@ -544,5 +552,90 @@ else
   fi
   rm -rf "$RUNPODCTL_TMP"
 fi
+
+# --- watermarks-remover service ---------------------------------------------
+# The remove-ai-marks skill cleans through this HTTP service. It runs INSIDE
+# this container on purpose: the box has a private network namespace, so a
+# host-side service on 127.0.0.1 is not reachable from it (which is why this
+# session started on demand via the wrapper below). The engine is python
+# stdlib only, so no venv or pip is needed - just the scripts.
+#
+# Debian 12 has no watermarks-remover package, so vendor the upstream source
+# tarball, same approach as actionlint/runpodctl above: pin the version and an
+# explicit SHA-256, verify BEFORE extracting. The tarball is a SOURCE archive,
+# so a single checksum covers every architecture - no per-arch split like those
+# two.
+#
+# TO BUMP: pick a new upstream release tag, download
+#   https://github.com/guillaumemeyer/watermarks-remover/archive/refs/tags/vX.Y.Z.tar.gz
+# and compute its sha256sum.
+WM_VERSION="0.5.0"
+WM_SHA256="4dbb6b26bc659ad4803225d2b072d1cbb1f318ce9ea421f42d78bbec0eccc73a"
+WM_LIB="/usr/local/lib/watermarks-remover"
+WM_TAR="watermarks-remover-v${WM_VERSION}.tar.gz"
+
+# Re-runs of this script are meant to be cheap: skip the download when the
+# pinned version is already installed.
+if [ -f "${WM_LIB}/version" ] && [ "$(cat "${WM_LIB}/version")" = "$WM_VERSION" ]; then
+  echo "watermarks-remover service ${WM_VERSION} already installed."
+else
+  echo "Installing the watermarks-remover service ${WM_VERSION}..."
+  WM_TMP="$(mktemp -d)"
+  if wget -qO "${WM_TMP}/${WM_TAR}" \
+      "https://github.com/guillaumemeyer/watermarks-remover/archive/refs/tags/v${WM_VERSION}.tar.gz"; then
+    # Verify BEFORE extracting, and bail out without installing on a mismatch.
+    if printf '%s  %s\n' "$WM_SHA256" "${WM_TMP}/${WM_TAR}" \
+        | sha256sum --check --status; then
+      tar xzf "${WM_TMP}/${WM_TAR}" -C "$WM_TMP" --wildcards "*/service/scripts/*"
+      rm -rf "$WM_LIB"
+      mkdir -p "$WM_LIB"
+      # The top directory in the tarball is watermarks-remover-<version>.
+      cp "${WM_TMP}"/watermarks-remover-*/service/scripts/* "$WM_LIB"/
+      printf '%s\n' "$WM_VERSION" > "$WM_LIB/version"
+      # The wrapper runs as the box user, not root, so this must be readable
+      # and traversable by everyone.
+      chmod -R a+rX "$WM_LIB"
+      echo "watermarks-remover service ${WM_VERSION} installed."
+    else
+      echo "WARNING: watermarks-remover checksum mismatch - refusing to install it. Everything else is unaffected."
+    fi
+  else
+    echo "WARNING: could not download watermarks-remover - skipping it. Everything else is unaffected."
+  fi
+  rm -rf "$WM_TMP"
+fi
+
+# Start-on-demand wrapper. Root-owned and world-executable: the box user's
+# shell (and the remove-ai-marks skill) invoke it, so it must not need root or
+# a write to /usr/local at runtime - it only reads and starts the service.
+cat > /usr/local/bin/watermarks-serve <<'WMSERVE_WRAPPER'
+#!/usr/bin/env bash
+# Idempotent start wrapper for the watermarks-remover service. The service
+# must live inside this container (private network namespace - a host-side
+# service on 127.0.0.1 is unreachable from here), so this checks the health
+# endpoint and starts the python stdlib server on demand when it is down.
+set -euo pipefail
+
+HEALTH="http://127.0.0.1:8765/health"
+if curl -sf "$HEALTH" >/dev/null 2>&1; then
+  exit 0
+fi
+
+nohup python3 /usr/local/lib/watermarks-remover/server.py \
+  --host 127.0.0.1 --port 8765 \
+  </dev/null >>/tmp/watermarks-serve.log 2>&1 &
+disown 2>/dev/null || true
+
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if curl -sf "$HEALTH" >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "watermarks-remover service did not come up - see /tmp/watermarks-serve.log" >&2
+exit 1
+WMSERVE_WRAPPER
+chmod 0755 /usr/local/bin/watermarks-serve
 
 echo "Container provisioning complete."
