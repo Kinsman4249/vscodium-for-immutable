@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-08-16
+
+### Added
+
+- `install-vscodium.sh` now writes a third launcher/`.desktop` pair - `~/.local/bin/vscodium-box-restart` and `vscodium-box Restart` in the app grid - that stops and starts the `vscodium-box` container (`podman stop` then `podman start`). Restarting re-triggers podman's `,z` SELinux relabel of the bind mounts, which runs at mount time rather than file-in-place time, so a file created on the host after the container was started keeps its host label and a `container_t` process is denied reading it. This is the failure that shows as `Permission denied` on a file dropped into a mounted folder while the box is running: the file is there, its SELinux label just says it is not for the container. The container runs `sleep infinity`, so the restart is quick and only re-relabels; it does not reinstall anything, but it does terminate the running VSCodium and any shell session inside, which is why it is an explicit app-grid action rather than something the editor triggers on its own. The `.desktop` entry uses `Terminal=true` and `Icon=view-refresh` (both standard freedesktop names) so the desktop environment supplies the terminal and no custom icon is installed. `uninstall-vscodium.sh` removes the new launcher and `.desktop` file alongside the existing ones, and `README.md` documents the new entry under a "Fixing Permission denied inside the box" section.
+
 ## [5.2.0] - 2026-08-16
 
 ### Added
