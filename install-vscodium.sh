@@ -75,7 +75,7 @@ set -euo pipefail
 
 # Bump this whenever the script's install logic changes. Only shown in --debug
 # output, so you can tell which version produced a given log.
-BUILD="2026.08.15-2"
+BUILD="2026.08.16-2"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
@@ -455,6 +455,12 @@ compute_env_args() {
         ;;
     esac
   done < <(podman inspect "$CONTAINER_NAME" --format '{{range .Config.Env}}{{println .}}{{end}}')
+  # Force a UTF-8 locale on every session this launcher starts. The container's
+  # own env is not guaranteed to set it (provision-container.sh sets it only for
+  # interactive bash, via /etc/bash.bashrc), yet the release skills' G7 ASCII
+  # lint needs a UTF locale for grep to accept its `\x{...}` classes above the
+  # BMP - hence LANG/LC_ALL on the exec, downstream of everything here.
+  env_args+=" --env LANG=C.UTF-8 --env LC_ALL=C.UTF-8"
   printf '%s' "$env_args"
 }
 
