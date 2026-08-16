@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-08-16
+
+### Added
+
+- `provision-container.sh` now installs the same-scheme watermark harness backends for the `watermarks-remover` service: a new `BOX_WITH_WM_HARNESSES` (default `1`) runs the vendored `setup_markllm.sh` and `setup_synthid.sh` (each non-fatal) into `$HOME/MarkLLM` and `$HOME/reverse-SynthID`, and `python3` + `python3-venv` are added to the base apt install (`python3 -m venv` needs the latter on Debian 12). The venvs are built on a standalone CPython 3.12 (from `python-build-standalone`, pinned tag `20260814`, SHA-256 verified before extract into `/usr/local/lib/python-build-standalone/`): the vendored MarkLLM/reverse-SynthID requirements pin 3.12-only `numpy==2.5.2` and `scipy==1.18.0`, which Debian 12's system `python3` (3.11) cannot satisfy, so a standalone 3.12 keeps every upstream pin intact; stale pre-3.12 venvs are dropped so they rebuild on it. The `watermarks-serve` wrapper now exports `MARKLLM_DIR` / `REVERSE_SYNTHID_DIR` before launching so `server.py` reports `harnesses.markllm` / `scorers.synthid` as true. Files written by root during provisioning are chowned back to the box user (same ownership fix the DeepSeek Harness npm section applies). `install-vscodium.sh` gains `--wm-harnesses` (default, no-op) and `--no-wm-harnesses` (opt-out). This is honest same-scheme verification only - MarkLLM KGW/prose and reverse-SynthID (pixel-domain only) - NOT a vendor detector, and it cannot certify DeepSeek, which has no public watermark scheme.
+
+### Fixed
+
+- The MarkLLM harness failed to generate or detect out of the box: upstream `setup_markllm.sh` (watermarks-remover v0.5.0) sparse-checkouts `THU-BPM/MarkLLM` without `/visualize/`, which every MarkLLM algorithm imports at module top level, so KGW produced `No module named 'visualize'`. Provisioning now adds the missing module to the checkout (`git sparse-checkout add /visualize/`), idempotent and non-fatal.
+
 ## [5.1.0] - 2026-08-16
 
 ### Added
