@@ -66,6 +66,10 @@
 #   ./install-vscodium.sh --claude          also install Claude Code. Off by
 #                                            default - DeepSeek Harness is
 #                                            installed either way
+#   ./install-vscodium.sh --no-wm-harnesses skip installing the MarkLLM /
+#                                            reverse-SynthID watermark
+#                                            backends. On by default - both are
+#                                            installed unless you pass this
 #   ./install-vscodium.sh --debug           same, but print every command run
 #   ./install-vscodium.sh --help            show this help
 #
@@ -121,6 +125,9 @@ GPU_FLAG_GIVEN=0
 X11_FLAG_GIVEN=0
 PUBLISH_PORTS=()
 WITH_CLAUDE=0
+# Same-scheme watermark backends for the watermarks-remover service: on by
+# default (MarkLLM + reverse-SynthID), opt-out with --no-wm-harnesses.
+WITH_WM_HARNESSES=1
 
 die() {
   echo "Error: $*" >&2
@@ -166,6 +173,15 @@ while [ $# -gt 0 ]; do
       ;;
     --claude)
       WITH_CLAUDE=1
+      shift
+      ;;
+    --wm-harnesses)
+      # Already the default; accepted so old habits/scripts don't break.
+      WITH_WM_HARNESSES=1
+      shift
+      ;;
+    --no-wm-harnesses)
+      WITH_WM_HARNESSES=0
       shift
       ;;
     --repos-dir)
@@ -431,6 +447,7 @@ provision_container() {
     --env "BOX_HOME=${HOME_REAL}" \
     --env "BOX_DEBUG=${DEBUG}" \
     --env "BOX_WITH_CLAUDE=${WITH_CLAUDE}" \
+    --env "BOX_WITH_WM_HARNESSES=${WITH_WM_HARNESSES}" \
     "$CONTAINER_NAME" bash -s < "$PROVISION_SCRIPT"
 }
 
@@ -619,6 +636,11 @@ do_install() {
     echo "Claude Code is installed too - run 'claude' and log in on first use."
   else
     echo "Claude Code was not installed; re-run with --claude to add it."
+  fi
+  if [ "$WITH_WM_HARNESSES" -eq 1 ]; then
+    echo "MarkLLM and reverse-SynthID backends are installed for the watermarks service."
+  else
+    echo "MarkLLM / reverse-SynthID backends were skipped (--no-wm-harnesses)."
   fi
   echo "Re-run this script any time to update everything."
 }

@@ -100,8 +100,12 @@ install_signing_key() {
 echo "Updating package lists..."
 apt-get update -qq
 
-echo "Ensuring base tooling (curl, gnupg, wget, ca-certificates, git, sudo) is present..."
-apt-get install -y -qq curl gnupg wget ca-certificates git sudo >/dev/null
+echo "Ensuring base tooling (curl, gnupg, wget, ca-certificates, git, sudo, python3) is present..."
+# python3 + python3-venv: the MarkLLM / reverse-SynthID backends make their own
+# .venv with `python3 -m venv`, which on Debian 12 needs python3-venv; python3
+# was never explicitly installed since the watermarks service itself is
+# stdlib-only.
+apt-get install -y -qq curl gnupg wget ca-certificates git sudo python3 python3-venv >/dev/null
 
 # --- locale -------------------------------------------------------------------
 # Debian's minimal image leaves LANG/LC_ALL unset, which falls back to the
@@ -605,6 +609,104 @@ else
   rm -rf "$WM_TMP"
 fi
 
+# --- standalone CPython 3.12 (watermark-harness interpreter) ------------------
+# The vendored MarkLLM / reverse-SynthID requirement files are written for
+# Python >=3.12 - they pin numpy==2.5.2 and scipy==1.18.0, both of which require
+# Python 3.12 - but Debian 12 ships only python3.11, while touching the vendored
+# pins would deviate from upstream's validated set. Instead, provide a
+# self-contained CPython 3.12 (astral's python-build-standalone, a glibc build
+# that runs on bookworm) and build the harness venvs on it. Pinned the same way
+# as actionlint/runpodctl/watermarks-remover above: an explicit SHA-256 is
+# verified BEFORE extracting.
+#
+# TO BUMP: pick a newer release tag from
+#   https://github.com/astral-sh/python-build-standalone/releases
+# and download the cpython-3.12.*+<tag>-x86_64-unknown-linux-gnu-install_only.tar.gz
+# for it, then compute its sha256sum.
+PY312_TAG="20260814"
+PY312_VERSION="3.12.14"
+PY312_SHA256="3297691ae34f75fed81ac424e040145fccb0bafe8e581cd5cadbddfa1c0766c0"
+PY312_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PY312_TAG}/cpython-${PY312_VERSION}%2B${PY312_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+PY312_TAR="cpython-${PY312_VERSION}+${PY312_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+PY312_DIR="/usr/local/lib/python-build-standalone"
+PY312_BIN="${PY312_DIR}/python/bin/python3.12"
+
+# Re-runs are cheap: skip the download when the built interpreter is already in
+# place. Guarded by BOX_WITH_WM_HARNESSES too, so --no-wm-harnesses never fetches
+# a runtime it does not need.
+if [ "${BOX_WITH_WM_HARNESSES:-1}" = "1" ] && [ ! -x "$PY312_BIN" ]; then
+  echo "Installing standalone CPython ${PY312_VERSION} for the watermark harnesses..."
+  PY312_TMP="$(mktemp -d)"
+  if wget -qO "${PY312_TMP}/${PY312_TAR}" "$PY312_URL"; then
+    if printf '%s  %s\n' "$PY312_SHA256" "${PY312_TMP}/${PY312_TAR}" \
+        | sha256sum --check --status; then
+      mkdir -p "$PY312_DIR"
+      tar xzf "${PY312_TMP}/${PY312_TAR}" -C "$PY312_DIR"
+      # The harness runs as the box user, not root, so this must be readable
+      # and traversable by everyone.
+      chmod -R a+rX "$PY312_DIR"
+      echo "Standalone CPython ${PY312_VERSION} installed."
+    else
+      echo "WARNING: CPython ${PY312_VERSION} checksum mismatch - refusing to install it. The watermark harnesses will be unavailable."
+    fi
+  else
+    echo "WARNING: could not download CPython ${PY312_VERSION} - skipping it. The watermark harnesses will be unavailable."
+  fi
+  rm -rf "$PY312_TMP"
+fi
+
+# --- watermark harness backends (MarkLLM / reverse-SynthID) -------------------
+# These give the watermarks-remover service same-scheme verification for the
+# rewrite-ai-marks skill. On by default, opt-out with --no-wm-harnesses.
+# The setup scripts clone upstream (THU-BPM/MarkLLM, aloshdenny/reverse-SynthID)
+# into $HOME and make their own .venv on the standalone 3.12 above (torch
+# install is the slow, first-run part). Each step is non-fatal: a failure prints
+# a WARNING and provisioning continues, so the wrapper below is still written
+# either way.
+if [ "${BOX_WITH_WM_HARNESSES:-1}" = "1" ] && [ -x "$PY312_BIN" ]; then
+  # A venv left over from before this standalone-Python step is a python3.11
+  # venv and unusable (the vendored requirements cannot resolve on 3.11). Drop
+  # any venv whose interpreter is not 3.12 so setup recreates it on the right
+  # one; the git checkouts themselves are kept, so there is no re-clone.
+  for dir in "$HOME/MarkLLM" "$HOME/reverse-SynthID"; do
+    if [ -x "$dir/.venv/bin/python" ] \
+       && ! "$dir/.venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 12) else 1)' 2>/dev/null; then
+      rm -rf "$dir/.venv"
+    fi
+  done
+  if [ -f "${WM_LIB}/setup_markllm.sh" ]; then
+    echo "Installing the MarkLLM watermark harness (torch download on first run)..."
+    MARKLLM_DIR="$HOME/MarkLLM" bash "${WM_LIB}/setup_markllm.sh" --python "$PY312_BIN" \
+      || echo "WARNING: could not set up MarkLLM - the watermarks service will report harnesses.markllm as false."
+    # Upstream v0.5.0's setup_markllm.sh sparse-checkout omits /visualize/, which
+    # every MarkLLM algorithm imports at top level (KGW generation fails with
+    # "No module named 'visualize'" without it). R2 confirmed this live. Add the
+    # missing module to the checkout; idempotent on re-runs, non-fatal.
+    if [ -d "$HOME/MarkLLM/.git" ]; then
+      git -C "$HOME/MarkLLM" sparse-checkout add '/visualize/' \
+        || echo "WARNING: could not add MarkLLM /visualize/ to the sparse checkout - the MarkLLM harness may fail to generate/detect."
+    fi
+  else
+    echo "WARNING: setup_markllm.sh is not vendored - skipping the MarkLLM harness."
+  fi
+  if [ -f "${WM_LIB}/setup_synthid.sh" ]; then
+    echo "Installing the reverse-SynthID watermark harness..."
+    REVERSE_SYNTHID_DIR="$HOME/reverse-SynthID" bash "${WM_LIB}/setup_synthid.sh" --python "$PY312_BIN" \
+      || echo "WARNING: could not set up reverse-SynthID - the watermarks service will report scorers.synthid as false."
+  else
+    echo "WARNING: setup_synthid.sh is not vendored - skipping the reverse-SynthID harness."
+  fi
+  # The setup scripts run as root but $HOME resolves to the box user's private
+  # home, so every file they wrote is root-owned and the box user gets EACCES
+  # on the .venv. Fix ownership unconditionally; cheap, and a no-op once it's
+  # already right (same fix the DeepSeek Harness npm section applies).
+  if [ -n "${BOX_USER:-}" ]; then
+    chown -R "${BOX_USER}:${BOX_GID}" "$HOME/MarkLLM" "$HOME/reverse-SynthID" 2>/dev/null
+  fi
+elif [ "${BOX_WITH_WM_HARNESSES:-1}" = "1" ]; then
+  echo "WARNING: the standalone CPython for the watermark harnesses is unavailable - harnesses.markllm and scorers.synthid will report false."
+fi
+
 # Start-on-demand wrapper. Root-owned and world-executable: the box user's
 # shell (and the remove-ai-marks skill) invoke it, so it must not need root or
 # a write to /usr/local at runtime - it only reads and starts the service.
@@ -620,6 +722,12 @@ HEALTH="http://127.0.0.1:8765/health"
 if curl -sf "$HEALTH" >/dev/null 2>&1; then
   exit 0
 fi
+
+# Expose the same-scheme harness backends (if present) to the service. server.py
+# reads these from the process environment once at startup, so they must be set
+# before the service launches. Harmless if provisioning skipped them.
+[ -d "$HOME/MarkLLM" ] && export MARKLLM_DIR="$HOME/MarkLLM"
+[ -d "$HOME/reverse-SynthID" ] && export REVERSE_SYNTHID_DIR="$HOME/reverse-SynthID"
 
 nohup python3 /usr/local/lib/watermarks-remover/server.py \
   --host 127.0.0.1 --port 8765 \

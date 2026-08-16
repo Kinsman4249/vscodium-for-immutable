@@ -11,7 +11,11 @@ toolchain (**shellcheck**, **actionlint**, **jq**, **fd**, **yamllint**).
 **Claude Code** is available too, opt-in via `--claude`. A pinned
 **watermarks-remover** service (python stdlib) is installed as well - the
 `remove-ai-marks` skill scrubs against it via `curl`, with the service started
-inside the box on demand by `watermarks-serve`. The script then
+inside the box on demand by `watermarks-serve`. The same-scheme watermark
+harness backends (**MarkLLM** and **reverse-SynthID**) are installed by default
+too, for controlled before/after verification of prose and images - opt out with
+`--no-wm-harnesses` (see
+[Watermark harness backends](#watermark-harness-backends)). The script then
 writes a launcher and a `.desktop` entry on the host, so the editor starts
 from the app grid like any native app.
 
@@ -192,6 +196,58 @@ or a route back out to the rest of the host.
     app grid/start menu and the taskbar/dock (an earlier version pointed
     `Icon=` at an absolute file path, which most taskbars can't resolve).
 
+### Watermark harness backends
+
+The `watermarks-remover` service can verify watermarks, but only honestly, as a
+same-scheme harness, not a vendor detector. To do that it needs two optional
+backends, both installed by default (opt out with `--no-wm-harnesses`, or keep
+them off by phrasing it as a re-run after a `--no-wm-harnesses` install):
+
+- **MarkLLM** ([THU-BPM/MarkLLM](https://github.com/THU-BPM/MarkLLM)): a
+  controlled, same-scheme prose harness. With it, the service can
+  watermark+detect text under a scheme you choose (e.g. KGW), so a before/after
+  diff shows whether text that cleared `remove-ai-marks`' Layer A also clears
+  that same scheme. It does **not** certify vendor schemes: there is no public
+  DeepSeek watermark scheme, so nothing here can prove text is not DeepSeek
+  watermarked.
+- **reverse-SynthID** ([aloshdenny/reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID)):
+  pixel-domain only, scores images (SynthID). It is not exercised by prose
+  rewrite flows.
+
+The backends live in the box's private home and are exposed to the service at
+startup:
+`MARKLLM_DIR=$HOME/MarkLLM` and `REVERSE_SYNTHID_DIR=$HOME/reverse-SynthID`.
+To verify inside the box (for example, from VSCodium's integrated terminal):
+
+```bash
+# prose: watermark + detect under the KGW scheme (first detect downloads opt-1.3b)
+"$HOME/MarkLLM/.venv/bin/python" \
+  /usr/local/lib/watermarks-remover/detect_text_watermark.py watermark sample.txt \
+  --scheme kgw -o wm.txt -o2 plain.txt
+"$HOME/MarkLLM/.venv/bin/python" \
+  /usr/local/lib/watermarks-remover/detect_text_watermark.py detect wm.txt --scheme kgw --json
+
+# images: emit a SynthID score for a PNG
+"$HOME/reverse-SynthID/.venv/bin/python" \
+  /usr/local/lib/watermarks-remover/score_synthid.py sample.png
+```
+
+Because both harnesses are only downloaded on demand (torch for MarkLLM, the
+spectral codebook for reverse-SynthID), a fresh install is slow once and cheap
+on re-runs. Files on the first install are written by root during provisioning;
+they are chowned back to the box user automatically, so the venv pythons above
+run without `sudo`.
+
+The venvs are built on a standalone CPython 3.12 that the provisioner installs
+from
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+(pinned tag + SHA-256, verified before extract, into
+`/usr/local/lib/python-build-standalone/`). The vendored MarkLLM /
+reverse-SynthID requirements target Python >=3.12 (they pin 3.12-only
+`numpy==2.5.2` and `scipy==1.18.0`), which Debian 12's system `python3` (3.11)
+cannot satisfy; shipping this standalone 3.12 keeps every upstream pin intact.
+On a re-run the provisioner skips the download once the interpreter is present.
+
 ### Signing key trust
 
 All four apt repositories are pinned to a dedicated keyring with `signed-by`,
@@ -244,6 +300,7 @@ Run these from a **host** terminal:
 ./install-vscodium.sh --no-gpu               # force software rendering
 ./install-vscodium.sh --publish 3000         # publish a port on 127.0.0.1
 ./install-vscodium.sh --claude               # also install Claude Code
+./install-vscodium.sh --no-wm-harnesses      # skip MarkLLM / reverse-SynthID backends
 ./install-vscodium.sh --debug                # print every command run
 ./install-vscodium.sh --help                 # show help
 
