@@ -415,7 +415,11 @@ nvidia_cuda_available() {
 # a host that declines the rule simply won't get GPU access, and the rest of the
 # install carries on.
 ensure_nvidia_selinux_module() {
-  local mod pp rc=0
+  # checkmodule requires the policy module name to match the base of the output
+  # .mod filename, so the temp files must be named after the module (not random
+  # mktemp names), or checkmodule fails its own name check and we'd print a
+  # bogus "could not compile" message.
+  local mod="/tmp/vscodium-box-nvidia.mod" pp="/tmp/vscodium-box-nvidia.pp" rc=0
   [ "$CUDA_ACTIVE" -eq 1 ] || return 0
   [ -f "$SELINUX_TE" ] || { echo "Note: $SELINUX_TE missing - cannot install the NVIDIA SELinux rule. CUDA inside the box will fail with 'Insufficient Permissions'."; return 0; }
   if ! command -v checkmodule >/dev/null 2>&1 || ! command -v semodule_package >/dev/null 2>&1; then
@@ -426,8 +430,6 @@ ensure_nvidia_selinux_module() {
     echo "    sudo semodule -i /tmp/vscodium-box-nvidia.pp"
     return 0
   fi
-  mod="$(mktemp --suffix=.mod)"
-  pp="$(mktemp --suffix=.pp)"
   checkmodule -M -m -o "$mod" "$SELINUX_TE" 2>/dev/null || rc=1
   if [ "$rc" -eq 0 ]; then
     semodule_package -o "$pp" -m "$mod" 2>/dev/null || rc=1
