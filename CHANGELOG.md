@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-08-18
+
+### Added
+
+- `install-vscodium.sh` now hands the whole NVIDIA GPU to the `vscodium-box` container when the host has the driver and the NVIDIA Container Toolkit's CDI spec, on by default. A fresh create detects `/dev/nvidiactl` plus `/etc/cdi/nvidia.yaml` and adds `--device nvidia.com/gpu=all` (CDI), so every `/dev/nvidia*` node, NVML and the driver libraries (`libcuda`, `nvidia-smi`) come from the host - no `--privileged`, no `--security-opt label=disable`. New flags: `--no-cuda` (keep the GPU out), `--no-llm` (pass the GPU but skip the in-box installs); creation-only. On an update run the already-created container's devices are read back with `podman inspect`, so a CUDA-enabled box keeps being provisioned (and a GPU-less host that upgrades mid-way is told it must recreate). Because `/dev/nvidia*` is `xserver_misc_device_t` and the container domain is denied that type, the installer ships `selinux/vscodium-box-nvidia.te` and best-effort installs it via `sudo -n` (compiles with `checkmodule`, `semodule_package`, `semodule`; non-fatal, prints the manual commands when sudo is password-gated) - without it NVML fails "Insufficient Permissions". Documented at length in a new README "CUDA note".
+- `provision-container.sh` provisions the CUDA LLM stack inside the box when the GPU was passed and `--no-llm` wasn't: the CUDA toolkit (`cuda-toolkit-12-8`, nvcc + cuBLAS + runtime) from NVIDIA's signed Debian 12 repo (keyring extracted from the `cuda-keyring_1.1-1_all.deb`, which is itself pinned by SHA-256, and the key fingerprint-checked like the other repos); **Ollama** `0.32.14` pinned by SHA-256 (`ollama-linux-amd64.tar.zst`); a CUDA build of **llama.cpp** `b10488` from a pinned source tarball (`-DGGML_CUDA=ON`, `CMAKE_CUDA_ARCHITECTURES=all-major` by default, installs `llama-cli`/`llama-server`) - upstream ships no CUDA-enabled Linux prebuilt, so it must be compiled; and a **vLLM**-ready Python venv (`~/llm-venv`) built on the standalone CPython 3.12 with torch first from PyTorch's CUDA 12.8 index then vLLM on top. Every step is non-fatal and gated hard on `BOX_WITH_CUDA`/`BOX_WITH_LLM`, so a GPU-less install is byte-for-byte unchanged. Ownership of the venv is handed back to the box user. README and the installer's "Testing changes" document the verification path: `podman exec vscodium-box nvidia-smi`, and `torch.cuda.is_available()` printing `True`.
+
 ## [5.3.0] - 2026-08-16
 
 ### Added
