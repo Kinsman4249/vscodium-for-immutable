@@ -34,6 +34,12 @@ fi
 : "${BOX_UID:?BOX_UID not set - run this through install-vscodium.sh}"
 : "${BOX_GID:?BOX_GID not set - run this through install-vscodium.sh}"
 : "${BOX_HOME:?BOX_HOME not set - run this through install-vscodium.sh}"
+# 1 when the host handed the NVIDIA GPU to the container via --device
+# nvidia.com/gpu=all (CDI). Off when there was no GPU/CDI setup to pass.
+: "${BOX_WITH_CUDA:-0}"
+# 1 to provision the CUDA LLM runtimes (vLLM/Ollama/llama.cpp) and the CUDA
+# toolkit inside the box. On when the host had a GPU and didn't pass --no-llm.
+: "${BOX_WITH_LLM:-0}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -330,6 +336,68 @@ if [ -f "$NODESOURCE_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/nodesource.lis
   echo "Registering the NodeSource apt repository (Node.js ${NODE_MAJOR}.x)..."
   echo "deb [signed-by=${NODESOURCE_KEYRING}] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
     > /etc/apt/sources.list.d/nodesource.list
+fi
+
+# --- NVIDIA CUDA apt repository (CUDA LLM runtimes) ---------------------------
+# Needed to BUILD llama.cpp with CUDA (nvcc + cuBLAS) and to give the box a
+# real CUDA toolkit alongside the driver that the host's CDI hook injects. The
+# three runtimes differ in what they need the toolkit for:
+#
+#   - vLLM and Ollama ship their own CUDA runtime in their wheels/binary and
+#     only need the *driver* (libcuda, NVML) that the CDI hook mounts - no
+#     toolkit. Checked with `python -c 'import torch; torch.cuda.is_available()'`.
+#   - llama.cpp ships NO CUDA-enabled Linux prebuilt binary (upstream only
+#     publishes CUDA builds for Windows), so it must be compiled here with
+#     `-DGGML_CUDA=ON`, which needs nvcc + cuBLAS: the toolkit.
+#
+# NVIDIA publishes a flat Debian 12 repo and a keyring .deb at the repo root.
+# Rather than `dpkg -i` that deb (which also drops its own sources list on
+# disk), the keyring is extracted from the .deb and installed with the same
+# signed-by + fingerprint gate every other repo here uses, so one mechanism
+# verifies everything. The .deb is verified by the explicit SHA-256 below
+# BEFORE it is extracted.
+#
+# TO BUMP: pick the newer cuda-keyring*.deb from
+#   https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/
+# compute its sha256sum, and update the fingerprints from the key it contains.
+CUDA_KEYRING_DEB="cuda-keyring_1.1-1_all.deb"
+CUDA_KEYRING_DEB_SHA256="e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d"
+CUDA_KEYRING="/usr/share/keyrings/cuda-archive-keyring.gpg"
+CUDA_FINGERPRINTS="EB693B3035CD5710E231E123A4B469963BF863CC"
+if [ ! -f "$CUDA_KEYRING" ]; then
+  echo "Installing the NVIDIA CUDA signing key..."
+  CUDA_TMP="$(mktemp -d)"
+  if wget -qO "${CUDA_TMP}/${CUDA_KEYRING_DEB}" \
+      "https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/${CUDA_KEYRING_DEB}"; then
+    if printf '%s  %s\n' "$CUDA_KEYRING_DEB_SHA256" "${CUDA_TMP}/${CUDA_KEYRING_DEB}" \
+        | sha256sum --check --status; then
+      # Extract just the keyring out of the .deb (dpkg-deb ships with dpkg,
+      # which is always present) and gate it on the fingerprints like the
+      # install_signing_key helper does for the plain key files.
+      CUDA_KEY_TMP="$(mktemp)"
+      if dpkg-deb --fsys-tarfile "${CUDA_TMP}/${CUDA_KEYRING_DEB}" \
+          | tar -xOf - './usr/share/keyrings/cuda-archive-keyring.gpg' > "$CUDA_KEY_TMP" 2>/dev/null; then
+        if key_fingerprints_ok "$CUDA_KEY_TMP" "$CUDA_FINGERPRINTS"; then
+          install -m 0644 "$CUDA_KEY_TMP" "$CUDA_KEYRING"
+        else
+          echo "WARNING: NVIDIA CUDA keyring fingerprints did not match - skipping the CUDA repository and LLM runtimes."
+        fi
+      else
+        echo "WARNING: could not extract the NVIDIA CUDA keyring from ${CUDA_KEYRING_DEB} - skipping the CUDA repository and LLM runtimes."
+      fi
+      rm -f "$CUDA_KEY_TMP"
+    else
+      echo "WARNING: NVIDIA CUDA keyring .deb checksum mismatch - refusing to use it. LLM runtimes will be skipped."
+    fi
+  else
+    echo "WARNING: could not download the NVIDIA CUDA keyring .deb - skipping the CUDA LLM runtimes."
+  fi
+  rm -rf "$CUDA_TMP"
+fi
+if [ -f "$CUDA_KEYRING" ] && [ ! -f /etc/apt/sources.list.d/cuda.list ]; then
+  echo "Registering the NVIDIA CUDA apt repository (debian12/x86_64)..."
+  echo "deb [signed-by=${CUDA_KEYRING}] https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/ /" \
+    > /etc/apt/sources.list.d/cuda.list
 fi
 
 # --- packages ---------------------------------------------------------------
@@ -705,6 +773,165 @@ if [ "${BOX_WITH_WM_HARNESSES:-1}" = "1" ] && [ -x "$PY312_BIN" ]; then
   fi
 elif [ "${BOX_WITH_WM_HARNESSES:-1}" = "1" ]; then
   echo "WARNING: the standalone CPython for the watermark harnesses is unavailable - harnesses.markllm and scorers.synthid will report false."
+fi
+
+# --- CUDA toolkit + LLM runtimes (vLLM / Ollama / llama.cpp) ------------------
+# Only when the host handed the GPU over (BOX_WITH_CUDA=1, i.e. --device
+# nvidia.com/gpu=all) and the LLM runtimes were asked for (BOX_WITH_LLM=1). The
+# NVIDIA CDI hook already mounts the driver (libcuda, NVML, nvidia-smi) into the
+# box, so nothing here installs a driver - this is the CUDA *toolkit* and the
+# three runtimes on top of it. Intentionally gated hard: on a host with no GPU
+# this is many gigabytes of mostly-useless install, so it stays off.
+if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
+  if [ -f /etc/apt/sources.list.d/cuda.list ]; then
+    echo "The box has an NVIDIA GPU (CDI passthrough). Installing the CUDA toolkit and LLM runtimes..."
+    echo "This is the large step - the CUDA toolkit (nvcc + cuBLAS) and the llama.cpp build dominate the time."
+
+    # libcurl/OpenSSL are needed to build llama.cpp; zstd to unpack Ollama's
+    # archive; build-essential + cmake for the llama.cpp compile. The NVIDIA
+    # repo was registered earlier in this script, so a fresh update is needed
+    # before the toolkit resolves.
+    apt-get update -qq
+    apt-get install -y cuda-toolkit-12-8 build-essential cmake pkg-config zstd libcurl4-openssl-dev \
+      || echo "WARNING: could not install the CUDA toolkit/build deps - the LLM runtimes will be unavailable."
+
+    # Expose nvcc (and the rest of the toolkit) on PATH for llama.cpp's cmake
+    # to find; the cuda-* deb meta symlinks /usr/local/cuda to the payload.
+    if [ -x /usr/local/cuda/bin/nvcc ]; then
+      export PATH="/usr/local/cuda/bin:$PATH"
+      echo "CUDA toolkit ready (nvcc $(/usr/local/cuda/bin/nvcc --version | sed -n '4p'))."
+    fi
+  else
+    echo "Note: the NVIDIA CUDA repository is not registered (its keyring install failed earlier) - skipping the CUDA toolkit and LLM runtimes."
+  fi
+
+  # --- Ollama ---------------------------------------------------------------
+  # A single self-contained binary that bundles its own CUDA runtime, so it
+  # only needs the driver the CDI hook mounts - no toolkit at runtime. Debian
+  # has no ollama package, so vendor the upstream release archive with the same
+  # pinned-version + SHA-256 approach as actionlint/runpodctl above. The modern
+  # linux-amd64 asset is .tar.zst (the older .tgz URL is gone upstream).
+  #
+  # TO BUMP: bump OLLAMA_VERSION, then fetch and verify the SHA from the
+  # sha256sum.txt attached to that GitHub release:
+  #   https://github.com/ollama/ollama/releases/download/vX.Y.Z/sha256sum.txt
+  OLLAMA_VERSION="0.32.14"
+  OLLAMA_SHA256="c620917a71e146ab3a7f893084f066069c4c65d144ef8379a91c3cbe8b27de8f"
+  OLLAMA_URL="https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"
+  if command -v ollama >/dev/null 2>&1; then
+    if [ "$(ollama --version 2>/dev/null)" = "ollama version is ${OLLAMA_VERSION}" ]; then
+      echo "Ollama ${OLLAMA_VERSION} already installed."
+    else
+      OLLAMA_UPGRADE=1
+    fi
+  fi
+  if [ -n "${OLLAMA_UPGRADE:-}" ] || ! command -v ollama >/dev/null 2>&1; then
+    echo "Installing Ollama ${OLLAMA_VERSION}..."
+    OLLAMA_TMP="$(mktemp -d)"
+    if wget -qO "${OLLAMA_TMP}/ollama.tar.zst" "$OLLAMA_URL"; then
+      if printf '%s  %s\n' "$OLLAMA_SHA256" "${OLLAMA_TMP}/ollama.tar.zst" \
+          | sha256sum --check --status; then
+        tar --zstd -xf "${OLLAMA_TMP}/ollama.tar.zst" -C "$OLLAMA_TMP"
+        install -m 0755 "${OLLAMA_TMP}/bin/ollama" /usr/local/bin/ollama
+        echo "Ollama ${OLLAMA_VERSION} installed."
+      else
+        echo "WARNING: Ollama checksum mismatch - refusing to install it."
+      fi
+    else
+      echo "WARNING: could not download Ollama - skipping it."
+    fi
+    rm -rf "$OLLAMA_TMP"
+  fi
+  # Models land under $HOME/.ollama/models - the box's private home, not the
+  # mounted repos dir - so they persist across rebuilds and stay out of your
+  # on-disk repos.
+  mkdir -p "$HOME/.ollama"
+
+  # --- llama.cpp (CUDA build) ------------------------------------------------
+  # llama.cpp publishes NO CUDA-enabled Linux prebuilt binary (upstream only
+  # ships CUDA builds for Windows - its linux-x64 ubuntu tarball is CPU-only),
+  # so to use the GPU it has to be compiled here with -DGGML_CUDA=ON, which is
+  # what the CUDA toolkit above is for. Vendor the pinned SOURCE tarball (one
+  # checksum covers every arch) and verify before extracting, like
+  # watermarks-remover.
+  #
+  # TO BUMP: bump LLAMA_TAG, download
+  #   https://github.com/ggml-org/llama.cpp/archive/refs/tags/<TAG>.tar.gz
+  # and compute its sha256sum.
+  LLAMA_TAG="b10488"
+  LLAMA_SHA256="a006ca1a0268a3748686040d1ae021939d92ec0f58f341a30e52056298da4a0b"
+  LLAMA_TAR="llama.cpp-${LLAMA_TAG}.tar.gz"
+  if [ -x /usr/local/bin/llama-server ] && [ -x /usr/local/bin/llama-cli ]; then
+    echo "llama.cpp ${LLAMA_TAG} already installed."
+  elif [ -x /usr/local/cuda/bin/nvcc ] && command -v cmake >/dev/null 2>&1; then
+    echo "Building llama.cpp ${LLAMA_TAG} with CUDA (first build compiles many kernels - be patient)..."
+    LLAMA_TMP="$(mktemp -d)"
+    if wget -qO "${LLAMA_TMP}/${LLAMA_TAR}" \
+        "https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_TAG}.tar.gz"; then
+      if printf '%s  %s\n' "$LLAMA_SHA256" "${LLAMA_TMP}/${LLAMA_TAR}" \
+          | sha256sum --check --status; then
+        tar xzf "${LLAMA_TMP}/${LLAMA_TAR}" -C "$LLAMA_TMP" \
+          --wildcards "llama.cpp-${LLAMA_TAG}/*"
+        # Default to every major arch so a plain install works on any NVIDIA
+        # GPU, not just the sm_86 on this box - slower to build, but portable.
+        # Override with BOX_LLAMA_CUDA_ARCHS (e.g. '86') to build for one GPU.
+        LLAMA_ARCHS="${BOX_LLAMA_CUDA_ARCHS:-all-major}"
+        if cmake -S "${LLAMA_TMP}/llama.cpp-${LLAMA_TAG}" \
+            -B "${LLAMA_TMP}/build" \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_ARCHS}" \
+            -DCMAKE_BUILD_TYPE=Release >/dev/null; then
+          if cmake --build "${LLAMA_TMP}/build" --config Release -j"$(nproc)" \
+              --target llama-cli llama-server >"${LLAMA_TMP}/build.log" 2>&1; then
+            mkdir -p /usr/local/bin
+            install -m 0755 "${LLAMA_TMP}/build/bin/llama-cli" /usr/local/bin/llama-cli
+            install -m 0755 "${LLAMA_TMP}/build/bin/llama-server" /usr/local/bin/llama-server
+            echo "llama.cpp ${LLAMA_TAG} (CUDA) installed."
+          else
+            echo "WARNING: llama.cpp build failed - see ${LLAMA_TMP}/build.log. llama-cli/llama-server will be unavailable."
+          fi
+        else
+          echo "WARNING: llama.cpp cmake configure failed - skipping the build."
+        fi
+      else
+        echo "WARNING: llama.cpp source checksum mismatch - refusing to build it."
+      fi
+    else
+      echo "WARNING: could not download llama.cpp source - skipping the build."
+    fi
+    rm -rf "$LLAMA_TMP"
+  else
+    echo "Note: llama.cpp build deps (nvcc/cmake) are unavailable - skipping the CUDA llama.cpp build."
+  fi
+
+  # --- CUDA Python (torch + vLLM) ---------------------------------------------
+  # vLLM's PyPI wheel bundles its own CUDA libs; it needs torch that also has
+  # CUDA, so torch is pulled first from PyTorch's CUDA 12.8 index and then
+  # vLLM on top (pip respects the already-satisfied cu128 torch). On the
+  # standalone 3.12 the watermark harnesses install, mirroring that venv
+  # approach. `python -c 'import torch; torch.cuda.is_available()'` printing
+  # True is the whole-pipeline GPU smoke test.
+  if [ -x "/usr/local/lib/python-build-standalone/python/bin/python3.12" ]; then
+    LLM_VENV="$HOME/llm-venv"
+    if [ ! -d "$LLM_VENV" ]; then
+      echo "Building the CUDA Python venv (torch is a large download on first run)..."
+      /usr/local/lib/python-build-standalone/python/bin/python3.12 -m venv "$LLM_VENV"
+      "$LLM_VENV/bin/pip" install --upgrade pip >/dev/null 2>&1
+      "$LLM_VENV/bin/pip" install torch --index-url https://download.pytorch.org/whl/cu128 \
+        || echo "WARNING: could not install CUDA torch - the LLM Python runtime will be unavailable."
+      "$LLM_VENV/bin/pip" install vllm \
+        || echo "WARNING: could not install vLLM - it will be unavailable (torch, if installed, still works)."
+    fi
+    # The venv is written as root during provisioning - hand it back to the box
+    # user so vllm/the smoke test run without sudo (same fix as the harnesses).
+    chown -R "${BOX_USER}:${BOX_GID}" "$LLM_VENV" 2>/dev/null || true
+  else
+    echo "Note: the standalone CPython 3.12 is unavailable - skipping the CUDA torch/vLLM venv."
+  fi
+
+  echo "CUDA LLM runtimes provisioned. Smoke-test inside the box with:"
+  echo "  nvidia-smi   # should list your GPU"
+  echo "  \"$HOME/llm-venv/bin/python\" -c 'import torch; print(torch.cuda.is_available())'"
 fi
 
 # Start-on-demand wrapper. Root-owned and world-executable: the box user's

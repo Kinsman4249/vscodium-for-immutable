@@ -1,0 +1,32 @@
+# Targeted SELinux allow rule for the vscodium-box NVIDIA GPU container.
+#
+# Why this exists: the host's /dev/nvidia* nodes (nvidiactl, nvidia0,
+# nvidia-uvm, nvidia-uvm-tools, nvidia-modeset) carry the SELinux type
+# xserver_misc_device_t (systemd-udev labels them that way). The container's
+# process domain (container_t) is allowed dri_device_t (that is why passing
+# /dev/dri for plain rendering works out of the box) but is NOT allowed
+# xserver_misc_device_t, so NVML and CUDA inside the box fail with
+# "Failed to initialize NVML: Insufficient Permissions" even though every
+# device node is present and world-accessible (mode 0666, per the CDI spec).
+#
+# This module allows container_t to open/read/write/ioctl the NVIDIA device
+# nodes. It applies to any container on the host, not just vscodium-box - the
+# same unavoidable trade-off as the Wayland connectto rule documented in
+# README.md. It grants no capabilities and touches no other types.
+#
+# Built with `ns:=true` style module packing:
+#   checkmodule -M -m -o vscodium-box-nvidia.mod vscodium-box-nvidia.te
+#   semodule_package -o vscodium-box-nvidia.pp -m vscodium-box-nvidia.mod
+#   sudo semodule -i vscodium-box-nvidia.pp
+# install-vscodium.sh attempts the last step best-effort (see
+# ensure_nvidia_selinux_module); remove with
+#   sudo semodule -r vscodium-box-nvidia
+module vscodium-box-nvidia 1.0;
+
+require {
+    type container_t;
+    type xserver_misc_device_t;
+    class chr_file { open read write ioctl getattr setattr lock map };
+}
+
+allow container_t xserver_misc_device_t:chr_file { open read write ioctl getattr setattr lock map };

@@ -8,8 +8,11 @@ It installs **VSCodium** from its official `.deb` package into a rootless
 **podman** container, along with the tools you actually need next to an editor:
 **git**, the **GitHub CLI**, **DeepSeek Harness**, **Chromium**, and a lint
 toolchain (**shellcheck**, **actionlint**, **jq**, **fd**, **yamllint**).
-**Claude Code** is available too, opt-in via `--claude`. A pinned
-**watermarks-remover** service (python stdlib) is installed as well - the
+On a host with an NVIDIA GPU and the NVIDIA Container Toolkit it also hands the
+whole GPU to the container (CDI) and provisions the **CUDA toolkit** plus the
+LLM runtimes **vLLM**, **Ollama**, and **llama.cpp** inside it, so a model can
+run fully on the GPU. **Claude Code** is available too, opt-in via `--claude`.
+A pinned **watermarks-remover** service (python stdlib) is installed as well - the
 `remove-ai-marks` skill scrubs against it via `curl`, with the service started
 inside the box on demand by `watermarks-serve`. The same-scheme watermark
 harness backends (**MarkLLM** and **reverse-SynthID**) are installed by default
@@ -97,6 +100,7 @@ Every path from the container to the host is one of these, and nothing else:
 | `~/.local/state/vscodium-box/home` | read-write | the container's private home: settings, extensions, dotfiles, DeepSeek Harness / Claude Code auth | yes |
 | the X11 socket (XWayland) | read-only | so a window can be drawn | yes |
 | `/dev/dri` | read-write | GPU-accelerated rendering instead of software fallback | yes, if present (pass `--no-gpu` to opt out) |
+| the NVIDIA GPU (`nvidia.com/gpu`) | read-write via CDI | the whole GPU for CUDA - the LLM runtimes (vLLM/Ollama/llama.cpp) | yes, if present (`--device nvidia.com/gpu=all`; pass `--no-cuda` to opt out) |
 | the Wayland socket | read-only | native Wayland instead of XWayland | no (pass `--wayland`; see [Wayland note](#wayland-note)) |
 | a `--publish` port | host `127.0.0.1` only | reach a dev server started inside the box | no |
 
@@ -106,12 +110,16 @@ state directory, not your home.
 
 **Never** mounted or shared, with no flag that changes it: your host home, the
 host filesystem (no `/run/host`), host `/tmp`, any device other than
-`/dev/dri`, the host D-Bus session, the host PID and IPC namespaces, or the
-host network namespace (a `--publish` port is forwarded in, not a shared
-namespace). The container also never runs `--privileged` and is never given
-`--security-opt label=disable`, so SELinux confinement (mounts are relabeled
-with `z`) stays enforced against it exactly as it would against any other
-process on the host.
+`/dev/dri` and the NVIDIA GPU device nodes, the host D-Bus session, the host
+PID and IPC namespaces, or the host network namespace (a `--publish` port is
+forwarded in, not a shared namespace). The container also never runs
+`--privileged` and is never given `--security-opt label=disable`, so SELinux
+confinement (mounts are relabeled with `z`) stays enforced against it exactly
+as it would against any other process on the host. The NVIDIA passthrough is
+CDI-driven - it adds only the `/dev/nvidia*` nodes and the driver libraries
+(`libcuda`, NVML, `nvidia-smi`), never `--privileged`, and the one targeted
+SELinux allow rule it needs is a separate, documented host change (see the
+[CUDA note](#cuda-note)).
 
 Consequences of that scoping, which are real trade-offs and not oversights:
 
@@ -199,6 +207,17 @@ or a route back out to the rest of the host.
     launcher's `Icon=` at it by name, so it shows up correctly in both the
     app grid/start menu and the taskbar/dock (an earlier version pointed
     `Icon=` at an absolute file path, which most taskbars can't resolve).
+14. When the host has `/dev/nvidiactl` and the NVIDIA Container Toolkit's CDI
+    spec, passes the whole GPU to the container with `--device
+    nvidia.com/gpu=all` (off by default only when `--no-cuda` was passed or
+    there's no driver) and installs the one targeted SELinux allow rule it
+    needs (best-effort via `sudo`; see the [CUDA note](#cuda-note)).
+15. When the GPU was passed and `--no-llm` wasn't, provisions the CUDA stack
+    inside the container: the **CUDA toolkit** (nvcc/cuBLAS, from NVIDIA's
+    signed Debian repo), **Ollama** (pinned upstream binary), a CUDA build of
+    **llama.cpp** (`llama-cli`/`llama-server`), and a **vLLM**-ready Python
+    venv with CUDA torch (`~/llm-venv`). See the [CUDA note](#cuda-note).
+    On a GPU-less host these steps are skipped entirely.
 
 ### Watermark harness backends
 
@@ -290,8 +309,33 @@ comments:
   going to pass `--wayland` - see the [Wayland note](#wayland-note) first.
 - Network access to `download.vscodium.com`, `gitlab.com`, `cli.github.com`,
   `deb.nodesource.com` (Node.js), `registry.npmjs.org` (DeepSeek Harness),
-  `github.com` (the actionlint release binary), Debian's mirrors, and, if you
-  pass `--claude`, `downloads.claude.ai`.
+  `github.com` (actionlint, runpodctl, Ollama, llama.cpp release assets), and
+  Debian's mirrors, and, if you pass `--claude`, `downloads.claude.ai`. The
+  CUDA LLM runtimes additionally need `download.pytorch.org` (torch) and
+  `developer.download.nvidia.com` (the CUDA toolkit and its keyring).
+
+### NVIDIA GPU (optional, for the CUDA LLM runtimes)
+
+To run a model on the GPU, the host needs two things, both already present on
+the box this was built for:
+
+- The **NVIDIA driver** (kernel module + `/dev/nvidia*` nodes). The container
+  gets the driver from the host via the Container Toolkit - nothing is
+  installed inside the box.
+- The **NVIDIA Container Toolkit** (`nvidia-container-toolkit`) with a CDI
+  spec generated, so podman can expose `nvidia.com/gpu`:
+
+  ```bash
+  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+  ```
+
+  The installer treats a present `/dev/nvidiactl` **and** `/etc/cdi/nvidia.yaml`
+  as "this host can hand over the GPU". If only the driver is there (no spec),
+  `--cuda` at create time errors out rather than silently doing nothing.
+
+CUDA is **on by default** when the driver + CDI spec are present; pass
+`--no-cuda` to keep the GPU out, or `--no-llm` to still hand it over but skip
+the multi-gigabyte CUDA toolkit and LLM runtime installs.
 
 ## Usage
 
@@ -302,6 +346,8 @@ Run these from a **host** terminal:
 ./install-vscodium.sh                        # update, reusing the saved repos dir
 ./install-vscodium.sh --wayland              # use native Wayland instead of XWayland
 ./install-vscodium.sh --no-gpu               # force software rendering
+./install-vscodium.sh --no-cuda              # do not expose/pass the NVIDIA GPU
+./install-vscodium.sh --no-llm               # skip the CUDA LLM runtimes + toolkit
 ./install-vscodium.sh --publish 3000         # publish a port on 127.0.0.1
 ./install-vscodium.sh --claude               # also install Claude Code
 ./install-vscodium.sh --no-wm-harnesses      # skip MarkLLM / reverse-SynthID backends
@@ -322,11 +368,11 @@ below.
 `--repos-dir` is required the first time and is saved to
 `~/.config/vscodium-box/repos-dir` for later runs. It must be a directory under
 your home, and the script refuses `/`, `$HOME` itself, and other paths that
-would defeat the point. `--repos-dir`, `--wayland`, `--no-gpu`/`--gpu` and
-`--publish` are fixed when the container is created; changing them means
-`./uninstall-vscodium.sh` followed by a fresh install. (`--gpu` and `--x11` are
-still accepted - they're just the defaults now, kept as no-ops so old habits
-and scripts don't break.)
+would defeat the point. `--repos-dir`, `--wayland`, `--no-gpu`/`--gpu`,
+`--no-cuda`/`--cuda`, `--no-llm` and `--publish` are fixed when the container
+is created; changing them means `./uninstall-vscodium.sh` followed by a fresh
+install. (`--gpu`, `--x11` and `--cuda` are still accepted - they're just the
+defaults now, kept as no-ops so old habits and scripts don't break.)
 
 Re-running the installer updates VSCodium (and git/gh, DeepSeek Harness,
 Chromium, and the lint toolchain) in place. Pass `--claude` again on a re-run
@@ -392,6 +438,70 @@ correctly without the compositing flag, remove that token from the
 `exec podman exec` line in `~/.local/bin/vscodium-box` **and** from
 `write_launcher` in `install-vscodium.sh` (otherwise it's re-applied on the
 next run).
+
+## CUDA note
+
+This is for running a model **on the GPU**, separate from the `/dev/dri`
+rendering path above. When the host has an NVIDIA driver and the NVIDIA
+Container Toolkit's CDI spec, the installer exposes the whole GPU to the box
+and provisions the CUDA stack inside it:
+
+- **GPU passthrough** - `podman create --device nvidia.com/gpu=all`. Every
+  `/dev/nvidia*` node, NVML, and the driver libraries (`libcuda`, `nvidia-smi`)
+  come from the host via the CDI hook; the box never installs a driver, and
+  this needs no `--privileged` and no `--security-opt label=disable`.
+- **CUDA toolkit** - nvcc + cuBLAS + the CUDA runtime, from NVIDIA's signed
+  Debian 12 apt repo. Needed to *compile* llama.cpp with CUDA (upstream ships
+  no CUDA-enabled Linux prebuilt - its linux-x64 tarball is CPU-only) and to
+  give the box a real toolkit.
+- **Three LLM runtimes**, each best-fit to how it gets CUDA:
+  - **vLLM** - `pip install vllm` (with torch pulled first from PyTorch's
+    CUDA 12.8 index) into `~/llm-venv`. vLLM and torch bundle their own CUDA
+    runtime and just use the injected driver.
+  - **Ollama** - the self-contained upstream binary (bundles CUDA), pinned
+    with an explicit SHA-256. Models land under `~/.ollama/models`.
+  - **llama.cpp** - built from a pinned source tag with `-DGGML_CUDA=ON`,
+    installing `llama-cli` and `llama-server` (cuBLAS-accelerated).
+
+To verify the whole pipeline from inside the box (a `vscodium-box Console` or
+VSCodium's integrated terminal):
+
+```bash
+nvidia-smi
+# GPU 0: NVIDIA GeForce RTX 3080 Laptop GPU (...)
+"$HOME/llm-venv/bin/python" -c 'import torch; print(torch.cuda.is_available())'
+# True
+```
+
+### The one SELinux rule it needs
+
+`/dev/nvidia*` is labeled `xserver_misc_device_t` by systemd-udev, and the
+container's process domain (`container_t`) is denied that type (it's allowed
+`dri_device_t` - that's why `/dev/dri` rendering works with no extra rule). So
+without a targeted allow rule, CUDA inside the box fails with
+`Failed to initialize NVML: Insufficient Permissions` even though every device
+node is present. Exactly like the Wayland rule above, this is a standing,
+host-level policy change - it is not scoped to one container and is not undone
+by `./uninstall-vscodium.sh`.
+
+The installer ships the rule as `selinux/vscodium-box-nvidia.te` and tries to
+compile + install it at create time via `sudo -n` (best-effort, never hangs).
+If sudo needs a password here - it does on this box - do it by hand once:
+
+```bash
+sudo checkmodule -M -m -o /tmp/vscodium-box-nvidia.mod \
+  /path/to/vscodium-for-immutable/selinux/vscodium-box-nvidia.te
+sudo semodule_package -o /tmp/vscodium-box-nvidia.pp -m /tmp/vscodium-box-nvidia.mod
+sudo semodule -i /tmp/vscodium-box-nvidia.pp
+```
+
+Remove it with `sudo semodule -r vscodium-box-nvidia` if you stop using the GPU.
+Without it the box simply can't open the GPU - everything else still installs.
+
+The GPU passthrough and CUDA provisioning are fixed at container creation
+(`--no-cuda`/`--no-llm` change them only on a fresh install), and the CUDA
+runtimes no-op on hosts with no driver, so a plain `./install-vscodium.sh` on a
+GPU-less machine is unchanged.
 
 ## Fixing Permission denied inside the box
 
@@ -459,6 +569,17 @@ socket (plus the Wayland socket if you passed `--wayland`). Then confirm from
 inside (`podman exec -it vscodium-box bash`) that `/run/host` does not exist,
 that `~` is the private home and not yours, and that a symlink planted in the
 repos directory pointing at `~/.ssh` dangles.
+
+If you're on a host with an NVIDIA GPU, verify the passthrough end-to-end. The
+container mounts no `/dev/nvidia*` unless the SELinux module in the
+[CUDA note](#cuda-note) is installed, so without it `podman exec` sees the
+devices but `nvidia-smi` inside fails with `Insufficient Permissions`:
+
+```bash
+podman exec vscodium-box nvidia-smi          # must list your GPU
+podman exec vscodium-box /bin/bash -lc '"$HOME/llm-venv/bin/python" -c "import torch; print(torch.cuda.is_available())"'  # True
+podman inspect vscodium-box --format '{{range .Devices}}{{.Path}}{{"\n"}}{{end}}'  # the /dev/nvidia* nodes
+```
 
 Finally, launch VSCodium from the app grid and check that the icon appears in
 the taskbar and that its integrated terminal has `git`, `gh`, `actionlint`,

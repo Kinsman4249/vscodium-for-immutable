@@ -13,8 +13,9 @@
 # Claude Code is available too, but only if you pass --claude - see below.
 #
 # WHAT THE CONTAINER CAN REACH ON THE HOST - this is the whole point of the
-# script, so it is stated exactly. Three bind mounts, plus /dev/dri if present,
-# and nothing else:
+# script, so it is stated exactly. The bind mounts, plus /dev/dri if present,
+# plus the NVIDIA GPU if the host has the Container Toolkit's CDI spec, and
+# nothing else:
 #
 #   1. the directory you pass to --repos-dir, read-write
 #   2. the container's own private home (settings, extensions, dotfiles,
@@ -25,6 +26,13 @@
 #      Wayland note in README.md
 #   4. /dev/dri, for GPU-accelerated rendering, if the host has one and
 #      --no-gpu was not passed
+#   5. the NVIDIA GPU, if /dev/nvidiactl and the Container Toolkit's CDI spec
+#      for nvidia.com/gpu (/etc/cdi/nvidia.yaml) exist and --no-cuda was not
+#      passed. The whole GPU is exposed - every /dev/nvidia* node, NVML, and
+#      the driver libraries via the CDI hook (nvidia-smi, libcuda, libnvml all
+#      appear inside the box, no in-container driver install). This powers the
+#      CUDA LLM runtimes provisioned inside it. Needs one host-side SELinux
+#      rule (ensure_nvidia_selinux_module) - see the CUDA node in README.md.
 #
 # It does NOT get your host home directory, the host filesystem, host /tmp,
 # other host devices, host processes, or the host D-Bus session. It is not
@@ -60,6 +68,14 @@
 #   ./install-vscodium.sh --no-gpu          force software rendering even if
 #                                            /dev/dri is available (creation
 #                                            only)
+#   ./install-vscodium.sh --no-cuda         do not expose the NVIDIA GPU to the
+#                                            container, even if one is present
+#                                            (creation only). CUDA is on by
+#                                            default when /dev/nvidiactl and a
+#                                            nvidia.com/gpu CDI spec exist
+#   ./install-vscodium.sh --no-llm          skip provisioning the CUDA LLM
+#                                            runtimes (vLLM/Ollama/llama.cpp)
+#                                            and the CUDA toolkit inside the box
 #   ./install-vscodium.sh --publish PORT    publish a container port on the
 #                                            host loopback (creation only,
 #                                            repeatable)
@@ -86,6 +102,9 @@ IMAGE="debian:12"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROVISION_SCRIPT="${SCRIPT_DIR}/provision-container.sh"
+# SELinux allow module for the NVIDIA device nodes - see selinux/ in this repo
+# and ensure_nvidia_selinux_module below.
+SELINUX_TE="${SCRIPT_DIR}/selinux/vscodium-box-nvidia.te"
 
 # $HOME on ostree systems is usually /home/<user>, a symlink to /var/home/<user>.
 # podman needs the real path for mount sources, and the checks below compare
@@ -129,6 +148,15 @@ GPU_FLAG_GIVEN=0
 X11_FLAG_GIVEN=0
 PUBLISH_PORTS=()
 WITH_CLAUDE=0
+# NVIDIA CUDA passthrough: on by default when the host has the NVIDIA Container
+# Toolkit's CDI spec for nvidia.com/gpu. Opt out with --no-cuda. Creation-only.
+USE_CUDA=1
+CUDA_FLAG_GIVEN=0
+CUDA_ACTIVE=0
+# Provision the CUDA LLM runtimes (vLLM/Ollama/llama.cpp) and the CUDA toolkit
+# inside the box. On by default; opt out with --no-llm (it is a multi-GB
+# install, so keeping the choice explicit matters).
+WITH_LLM=1
 # Same-scheme watermark backends for the watermarks-remover service: on by
 # default (MarkLLM + reverse-SynthID), opt-out with --no-wm-harnesses.
 WITH_WM_HARNESSES=1
@@ -153,6 +181,18 @@ while [ $# -gt 0 ]; do
     --no-gpu)
       USE_GPU=0
       GPU_FLAG_GIVEN=1
+      shift
+      ;;
+    --cuda)
+      # Already the default on NVIDIA hosts; accepted so it can be stated
+      # explicitly and so re-runs make the intent visible.
+      USE_CUDA=1
+      CUDA_FLAG_GIVEN=1
+      shift
+      ;;
+    --no-cuda)
+      USE_CUDA=0
+      CUDA_FLAG_GIVEN=1
       shift
       ;;
     --x11)
@@ -186,6 +226,15 @@ while [ $# -gt 0 ]; do
       ;;
     --no-wm-harnesses)
       WITH_WM_HARNESSES=0
+      shift
+      ;;
+    --llm)
+      # Already the default; accepted so old habits/scripts don't break.
+      WITH_LLM=1
+      shift
+      ;;
+    --no-llm)
+      WITH_LLM=0
       shift
       ;;
     --repos-dir)
@@ -339,6 +388,66 @@ resolve_repos_dir() {
   exit 1
 }
 
+# Returns success when the host can hand the whole NVIDIA GPU to the container:
+# the control device exists AND the NVIDIA Container Toolkit has generated a CDI
+# spec, which is what lets podman inject the device nodes and the driver
+# libraries via `--device nvidia.com/gpu=all`. A real NVIDIA GPU present but no
+# CDI spec means the toolkit isn't configured yet - that is "not available" so
+# the installer can tell you exactly what to fix rather than silently omitting
+# it.
+nvidia_cuda_available() {
+  { [ -c /dev/nvidiactl ] || [ -e /dev/nvidiactl ]; } \
+    && { [ -f /etc/cdi/nvidia.yaml ] || [ -f /var/run/cdi/nvidia.yaml ]; }
+}
+
+# Installs (or refreshes) the targeted SELinux allow rule that lets the
+# container's process domain use the NVIDIA device nodes. The nodes are labeled
+# xserver_misc_device_t by systemd-udev, and container_t is denied that type -
+# absent this rule, CUDA/NVML inside the box fail with "Insufficient
+# Permissions" even though every device node is present. See the .te file and
+# the CUDA node in README.md.
+#
+# This is the one host-side change this feature needs, and it follows the same
+# precedent as the Wayland connectto rule in README.md: best-effort via sudo at
+# install time, with the exact manual commands printed when sudo is unavailable
+# (this box's sudo prompts for a password, so the attempt is always non-root
+# aware and never hangs a non-interactive run). It is non-fatal on every path:
+# a host that declines the rule simply won't get GPU access, and the rest of the
+# install carries on.
+ensure_nvidia_selinux_module() {
+  local mod pp rc=0
+  [ "$CUDA_ACTIVE" -eq 1 ] || return 0
+  [ -f "$SELINUX_TE" ] || { echo "Note: $SELINUX_TE missing - cannot install the NVIDIA SELinux rule. CUDA inside the box will fail with 'Insufficient Permissions'."; return 0; }
+  if ! command -v checkmodule >/dev/null 2>&1 || ! command -v semodule_package >/dev/null 2>&1; then
+    echo "Note: SELinux policy tooling (checkmodule/semodule_package) is not installed here, so the NVIDIA allow rule cannot be installed automatically."
+    echo "  To enable GPU inside the box later, run:"
+    echo "    sudo checkmodule -M -m -o /tmp/vscodium-box-nvidia.mod $SELINUX_TE"
+    echo "    sudo semodule_package -o /tmp/vscodium-box-nvidia.pp -m /tmp/vscodium-box-nvidia.mod"
+    echo "    sudo semodule -i /tmp/vscodium-box-nvidia.pp"
+    return 0
+  fi
+  mod="$(mktemp --suffix=.mod)"
+  pp="$(mktemp --suffix=.pp)"
+  checkmodule -M -m -o "$mod" "$SELINUX_TE" 2>/dev/null || rc=1
+  if [ "$rc" -eq 0 ]; then
+    semodule_package -o "$pp" -m "$mod" 2>/dev/null || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    if sudo -n semodule -i "$pp" 2>/dev/null; then
+      echo "Installed the NVIDIA SELinux allow rule (vscodium-box-nvidia) - the box can now use the GPU."
+    else
+      echo "Note: could not install the NVIDIA SELinux allow rule non-interactively (sudo needs a password here)."
+      echo "  The box will be unable to use the GPU until you run:"
+      echo "    sudo checkmodule -M -m -o /tmp/vscodium-box-nvidia.mod $SELINUX_TE"
+      echo "    sudo semodule_package -o /tmp/vscodium-box-nvidia.pp -m /tmp/vscodium-box-nvidia.mod"
+      echo "    sudo semodule -i /tmp/vscodium-box-nvidia.pp"
+    fi
+  else
+    echo "Note: could not compile the NVIDIA SELinux allow rule (checkmodule failed). See $SELINUX_TE."
+  fi
+  rm -f "$mod" "$pp"
+}
+
 create_container() {
   local uid gid user wayland_sock create_args port
 
@@ -426,6 +535,26 @@ create_container() {
     # install on a host with no GPU device.
   fi
 
+  if [ "$USE_CUDA" -eq 1 ]; then
+    if nvidia_cuda_available; then
+      # CDI injection hands over the whole GPU: every /dev/nvidia* node plus
+      # the driver libraries (NVML, libcuda, nvidia-smi) via the Container
+      # Toolkit's CDI hook. No --privileged, no label=disable - the other
+      # scoping holds; only the NVML access above is added by
+      # ensure_nvidia_selinux_module. The CDI spec also carries the /dev/dri
+      # device the toolkit found, so both compute and graphics come through
+      # in one flag.
+      create_args+=(--device nvidia.com/gpu=all)
+      CUDA_ACTIVE=1
+      echo "NVIDIA GPU found - exposing it and the CUDA driver to the container (nvidia.com/gpu)."
+    elif [ "$CUDA_FLAG_GIVEN" -eq 1 ]; then
+      die "--cuda was passed but the host has no usable NVIDIA CDI setup (need /dev/nvidiactl and /etc/cdi/nvidia.yaml, typically via the nvidia-container-toolkit). Install the toolkit and run 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml', or pass --no-cuda."
+    else
+      echo "Note: no CUDA-capable NVIDIA setup detected (/dev/nvidiactl + nvidia.com/gpu CDI spec missing) - skipping GPU passthrough and the CUDA LLM runtimes."
+      WITH_LLM=0
+    fi
+  fi
+
   # Loopback only, never 0.0.0.0: publishing a dev server to the whole network
   # is not something an install script should do behind your back.
   for port in ${PUBLISH_PORTS+"${PUBLISH_PORTS[@]}"}; do
@@ -452,6 +581,8 @@ provision_container() {
     --env "BOX_DEBUG=${DEBUG}" \
     --env "BOX_WITH_CLAUDE=${WITH_CLAUDE}" \
     --env "BOX_WITH_WM_HARNESSES=${WITH_WM_HARNESSES}" \
+    --env "BOX_WITH_CUDA=${CUDA_ACTIVE}" \
+    --env "BOX_WITH_LLM=${WITH_LLM}" \
     "$CONTAINER_NAME" bash -s < "$PROVISION_SCRIPT"
 }
 
@@ -658,15 +789,40 @@ DESKTOP_EOF
   fi
 }
 
+# Returns success when an already-created container was given the NVIDIA GPU
+# (i.e. its CDI device nodes carry /dev/nvidia*). Used on update runs, where
+# create_container is not called again, so the provisioner still knows to
+# (re)install the CUDA LLM runtimes for a box that predates them or was created
+# on a GPU host.
+container_has_nvidia() {
+  podman container exists "$CONTAINER_NAME" \
+    && podman inspect "$CONTAINER_NAME" \
+      --format '{{range .HostConfig.Devices}}{{.PathOnHost}}{{"\n"}}{{end}}' 2>/dev/null \
+    | grep -q nvidia
+}
+
 do_install() {
   require_podman
 
   if container_exists; then
     check_legacy_container
     echo "Container '$CONTAINER_NAME' already exists - updating in place."
+    if container_has_nvidia; then
+      # An existing box that was created on a GPU host (or is being upgraded to
+      # this CUDA feature): light the same path as a fresh --cuda create, so the
+      # provisioner (re)installs the CUDA LLM runtimes and the SELinux rule is
+      # (re)ensured.
+      CUDA_ACTIVE=1
+    elif [ "$USE_CUDA" -eq 1 ] && nvidia_cuda_available; then
+      # The container predates the CUDA feature but this host can hand over the
+      # GPU now. Can't change a running container's devices - the user must
+      # recreate - but we can say so plainly instead of silently doing nothing.
+      echo "Note: this host has a usable NVIDIA GPU, but an existing container's devices are fixed at creation."
+      echo "  Run ./uninstall-vscodium.sh and install again (no flags needed) to expose the GPU and provision the CUDA LLM runtimes."
+    fi
     if [ -n "$REPOS_DIR" ] || [ "$GPU_FLAG_GIVEN" -eq 1 ] || [ "$X11_FLAG_GIVEN" -eq 1 ] \
-       || [ ${#PUBLISH_PORTS[@]} -gt 0 ]; then
-      echo "Note: --repos-dir, --wayland, --gpu/--no-gpu and --publish only take effect when"
+       || [ "$CUDA_FLAG_GIVEN" -eq 1 ] || [ ${#PUBLISH_PORTS[@]} -gt 0 ]; then
+      echo "Note: --repos-dir, --wayland, --gpu/--no-gpu, --cuda/--no-cuda and --publish only take effect when"
       echo "the container is created. Run ./uninstall-vscodium.sh and install again to change them."
       if [ -n "$REPOS_DIR" ]; then
         REPOS_DIR="$(validate_repos_dir "$REPOS_DIR")" || exit 1
@@ -677,6 +833,11 @@ do_install() {
     resolve_repos_dir
     create_container
   fi
+
+  # CUDA_ACTIVE is now whatever it should be on both paths (from create_container,
+  # or from container_has_nvidia on an update). Ensure the one SELinux rule the
+  # GPU needs.
+  ensure_nvidia_selinux_module
 
   provision_container
   write_launcher
@@ -699,6 +860,16 @@ do_install() {
     echo "MarkLLM and reverse-SynthID backends are installed for the watermarks service."
   else
     echo "MarkLLM / reverse-SynthID backends were skipped (--no-wm-harnesses)."
+  fi
+  if [ "$CUDA_ACTIVE" -eq 1 ]; then
+    echo "NVIDIA GPU is exposed to the container (CDI). Confirm inside the box with: podman exec vscodium-box nvidia-smi"
+    if [ "$WITH_LLM" -eq 1 ]; then
+      echo "CUDA LLM runtimes (vLLM, Ollama, llama.cpp) and the CUDA toolkit are provisioned inside the box."
+    else
+      echo "CUDA LLM runtime provisioning was skipped (--no-llm)."
+    fi
+  elif [ "$USE_CUDA" -eq 1 ]; then
+    echo "No NVIDIA GPU was exposed (no /dev/nvidiactl + nvidia.com/gpu CDI spec) - the CUDA LLM runtimes were not installed."
   fi
   echo "Re-run this script any time to update everything."
 }
