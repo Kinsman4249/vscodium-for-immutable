@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Re-exec under bash even if invoked via /bin/sh (POSIX), which rejects the
+# bash-specific array syntax used elsewhere in this script.
+if [ -z "${BASH_VERSION:-}" ] && command -v bash >/dev/null 2>&1; then
+  exec bash "$0" "$@"
+fi
 #
 # One-click installer/updater for VSCodium on immutable Fedora hosts
 # (Bazzite, Silverblue, Kinoite, and similar) that can't install .deb/.rpm
