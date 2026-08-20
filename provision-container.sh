@@ -414,6 +414,15 @@ echo "Installing/updating exiftool and qpdf..."
 apt-get install -y libimage-exiftool-perl qpdf \
   || echo "WARNING: could not install exiftool/qpdf. The watermarks-remover service will degrade on PDF/container strips."
 
+# CPU-only cheap image analysis for the `visualize` skill: tesseract (OCR),
+# ImageMagick (identify/convert + histogram color), and python3-PIL/numpy for
+# the color/detail heuristics. python3-opencv is optional (faces via Haar
+# cascade). All are plain Debian 12 main packages. Without them the skill
+# still reports identity via exiftool and honestly marks the rest unavailable.
+echo "Installing/updating the visualize skill's CPU image-analysis tools..."
+apt-get install -y tesseract-ocr imagemagick python3-pil python3-numpy python3-opencv file \
+  || echo "WARNING: could not install tesseract/imagemagick/python3-PIL/numpy/opencv/file. The visualize skill will degrade to exiftool identity only."
+
 # libsecret-tools: provides the `secret-tool` binary that runpod-helper's
 # startup.sh uses to store RUNPOD_API_KEY in the OS keyring instead of a
 # plaintext file. Needs a reachable D-Bus session bus with an unlocked Secret
