@@ -855,6 +855,11 @@ if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
   # mounted repos dir - so they persist across rebuilds and stay out of your
   # on-disk repos.
   mkdir -p "$HOME/.ollama"
+  # Provisioning runs as root, so this dir starts root-owned and Ollama would
+  # fail to write its id_ed25519 key (and later, models) as the normal user.
+  # Hand it to the box user like the other user home dirs above.
+  chown -R "${BOX_USER}:${BOX_GID}" "$HOME/.ollama" 2>/dev/null || \
+    echo "WARNING: could not chown $HOME/.ollama to ${BOX_USER}:${BOX_GID}; Ollama may fail to start for the user."
 
   # --- llama.cpp (CUDA build) ------------------------------------------------
   # llama.cpp publishes NO CUDA-enabled Linux prebuilt binary (upstream only
