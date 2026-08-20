@@ -815,11 +815,15 @@ if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
   fi
 
   # --- Ollama ---------------------------------------------------------------
-  # A single self-contained binary that bundles its own CUDA runtime, so it
-  # only needs the driver the CDI hook mounts - no toolkit at runtime. Debian
-  # has no ollama package, so vendor the upstream release archive with the same
-  # pinned-version + SHA-256 approach as actionlint/runpodctl above. The modern
-  # linux-amd64 asset is .tar.zst (the older .tgz URL is gone upstream).
+  # The linux-amd64 release is two parts: the `ollama` CLI plus a `lib/ollama/`
+  # tree that carries the llama-server runner and the CUDA runtime shared
+  # objects, so it only needs the driver the CDI hook mounts - no toolkit at
+  # runtime. Both parts must be installed together; the CLI locates the runner
+  # under /usr/local/lib/ollama relative to its own /usr/local/bin path.
+  # Debian has no ollama package, so vendor the upstream release archive with
+  # the same pinned-version + SHA-256 approach as actionlint/runpodctl above.
+  # The modern linux-amd64 asset is .tar.zst (the older .tgz URL is gone
+  # upstream).
   #
   # TO BUMP: bump OLLAMA_VERSION, then fetch and verify the SHA from the
   # sha256sum.txt attached to that GitHub release:
@@ -842,6 +846,12 @@ if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
           | sha256sum --check --status; then
         tar --zstd -xf "${OLLAMA_TMP}/ollama.tar.zst" -C "$OLLAMA_TMP"
         install -m 0755 "${OLLAMA_TMP}/bin/ollama" /usr/local/bin/ollama
+        # The runner + CUDA libs in lib/ollama are mandatory at runtime - the
+        # CLI errors "llama-server binary not found" without them. Copy the
+        # whole tree so the shared objects and runner land where ollama looks.
+        install -d /usr/local/lib/ollama
+        cp -a "${OLLAMA_TMP}/lib/ollama"/. /usr/local/lib/ollama/ \
+          || echo "WARNING: could not copy ollama runtime libs; models will fail to load with 'llama-server binary not found'."
         echo "Ollama ${OLLAMA_VERSION} installed."
       else
         echo "WARNING: Ollama checksum mismatch - refusing to install it."
