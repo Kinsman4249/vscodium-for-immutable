@@ -509,8 +509,18 @@ create_container() {
       --env "DISPLAY=:${display_num}"
     )
     if [ -n "${XAUTHORITY:-}" ] && [ -f "$XAUTHORITY" ]; then
+      # Bind the Xauthority cookie through a STABLE source file, not the live
+      # path. Xwayland/Xorg write $XAUTHORITY as /run/user/$UID/xauth_<random>,
+      # regenerated under a NEW random name on every session; baking the
+      # transient path into the container makes every later `podman start`
+      # fail with "getxattr ... no such file or directory" once that cookie is
+      # gone (the recorded mount points at a file that no longer exists). Copy
+      # the current cookie to a fixed path and mount that instead; the
+      # generated launchers refresh it from $XAUTHORITY before each start.
+      local stable_xauth="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/xauth-vscodium"
+      install -m 0600 "$XAUTHORITY" "$stable_xauth"
       create_args+=(
-        --volume "${XAUTHORITY}:/run/user/${uid}/.Xauthority:ro,z"
+        --volume "${stable_xauth}:/run/user/${uid}/.Xauthority:ro,z"
         --env "XAUTHORITY=/run/user/${uid}/.Xauthority"
       )
     fi
@@ -623,6 +633,23 @@ compute_env_args() {
   printf '%s' "$env_args"
 }
 
+# Emits the host-side statement that keeps the stable X11 Xauthority file
+# current right before a container start. Xwayland/Xorg re-point $XAUTHORITY at
+# a fresh random-named file on every session, which is exactly what made the old
+# create-time mount go stale; copying the live cookie onto the fixed path the
+# container is bound to makes the mounted source valid (and, thanks to podman
+# re-running its ',z' SELinux relabel at each start, freshly labeled) before the
+# container transitions to running. This snippet is spliced verbatim into the
+# generated launchers below.
+xauth_refresh_snippet() {
+  cat <<'XREF'
+# Refresh the stable X11 Xauthority file so the container mounts a live cookie.
+if [ -n "${XAUTHORITY:-}" ] && [ -f "$XAUTHORITY" ]; then
+  install -m 0600 "$XAUTHORITY" "${XDG_RUNTIME_DIR:?}/xauth-vscodium" 2>/dev/null || true
+fi
+XREF
+}
+
 # Replaces what distrobox-export used to do. Generating the launcher and the
 # .desktop entry outright is simpler than patching whatever a tool emitted, and
 # both files now live somewhere the container cannot write to.
@@ -651,6 +678,7 @@ write_launcher() {
 # the next run. Starts the ${CONTAINER_NAME} container if needed, then runs
 # VSCodium inside it.
 set -euo pipefail
+$(xauth_refresh_snippet)
 podman start ${CONTAINER_NAME} >/dev/null
 exec podman exec --interactive${env_args} ${CONTAINER_NAME} \\
   /usr/bin/codium ${gpu_flags} "\$@"
@@ -720,6 +748,7 @@ write_console_launcher() {
 # the next run. Starts the ${CONTAINER_NAME} container if needed, then drops
 # into a login shell inside it - no VSCodium.
 set -euo pipefail
+$(xauth_refresh_snippet)
 podman start ${CONTAINER_NAME} >/dev/null
 exec podman exec --interactive --tty${env_args} ${CONTAINER_NAME} /bin/bash -l
 WRAPPER_EOF
@@ -771,6 +800,7 @@ write_restart_launcher() {
 # files readable from inside the box again. Kills the running VSCodium.
 set -euo pipefail
 podman stop ${CONTAINER_NAME} >/dev/null
+$(xauth_refresh_snippet)
 podman start ${CONTAINER_NAME} >/dev/null
 echo "Restarted ${CONTAINER_NAME}; its bind mounts have been relabeled for SELinux."
 WRAPPER_EOF
