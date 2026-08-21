@@ -84,6 +84,10 @@ fi
 #   ./install-vscodium.sh --publish PORT    publish a container port on the
 #                                            host loopback (creation only,
 #                                            repeatable)
+#   ./install-vscodium.sh --network MODE    podman network mode for the
+#                                            container (creation only, e.g.
+#                                            slirp4netns when the default
+#                                            pasta/bridge net is offline)
 #   ./install-vscodium.sh --claude          also install Claude Code. Off by
 #                                            default - DeepSeek Harness is
 #                                            installed either way
@@ -152,6 +156,12 @@ USE_X11=1
 GPU_FLAG_GIVEN=0
 X11_FLAG_GIVEN=0
 PUBLISH_PORTS=()
+# Podman network mode for the container. Empty = podman's default (pasta on a
+# netavark rootless backend). Some hosts (immutable Fedora/Bazzite without a
+# working user-netns pasta) leave the default network offline - the container
+# gets no route and apt fails with 'Temporary failure resolving'. Pass
+# --network slirp4netns there. Creation-only.
+NETWORK_MODE=""
 WITH_CLAUDE=0
 # NVIDIA CUDA passthrough: on by default when the host has the NVIDIA Container
 # Toolkit's CDI spec for nvidia.com/gpu. Opt out with --no-cuda. Creation-only.
@@ -216,8 +226,13 @@ while [ $# -gt 0 ]; do
       PUBLISH_PORTS+=("$2")
       shift 2
       ;;
-    --publish=*)
-      PUBLISH_PORTS+=("${1#*=}")
+    --network)
+      NETWORK_MODE="${2:-}"
+      [ -n "$NETWORK_MODE" ] || die "--network requires a value (e.g. slirp4netns)."
+      shift 2
+      ;;
+    --network=*)
+      NETWORK_MODE="${1#*=}"
       shift
       ;;
     --claude)
@@ -588,6 +603,12 @@ create_container() {
     esac
     create_args+=(--publish "127.0.0.1:${port}:${port}")
   done
+
+  # Override podman's default network mode (pasta) when the caller asked for a
+  # specific one. Needed on hosts where the default rootless backend is broken.
+  if [ -n "$NETWORK_MODE" ]; then
+    create_args+=(--network "$NETWORK_MODE")
+  fi
 
   echo "Relabeling mounts for SELinux - on a large repos directory this can take a moment..."
   # 'sleep infinity' just keeps the container alive; the launcher runs VSCodium
