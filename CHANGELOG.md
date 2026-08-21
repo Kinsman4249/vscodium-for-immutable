@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.5.1] - 2026-08-20
+
+### Fixed
+
+- The NVIDIA SELinux allow rule could no longer be compiled after a manual `sudo` install: the temp files were written to fixed `/tmp/vscodium-box-nvidia.{mod,pp}`, and once a root-owned copy existed at those paths (which the script's own manual-install instructions create via `sudo`), a non-root install could neither overwrite them (checkmodule failed, "could not compile") nor remove them ("Operation not permitted"). `ensure_nvidia_selinux_module` now builds the module-named files inside a unique user-owned temp directory, which still satisfies checkmodule's output-naming rule while keeping each run's files writable and self-cleaning.
+
 ## [5.5.0] - 2026-08-20
 
 ### Added

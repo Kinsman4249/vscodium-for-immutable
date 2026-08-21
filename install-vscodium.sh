@@ -420,11 +420,6 @@ nvidia_cuda_available() {
 # a host that declines the rule simply won't get GPU access, and the rest of the
 # install carries on.
 ensure_nvidia_selinux_module() {
-  # checkmodule requires the policy module name to match the base of the output
-  # .mod filename, so the temp files must be named after the module (not random
-  # mktemp names), or checkmodule fails its own name check and we'd print a
-  # bogus "could not compile" message.
-  local mod="/tmp/vscodium-box-nvidia.mod" pp="/tmp/vscodium-box-nvidia.pp" rc=0
   [ "$CUDA_ACTIVE" -eq 1 ] || return 0
   [ -f "$SELINUX_TE" ] || { echo "Note: $SELINUX_TE missing - cannot install the NVIDIA SELinux rule. CUDA inside the box will fail with 'Insufficient Permissions'."; return 0; }
   if ! command -v checkmodule >/dev/null 2>&1 || ! command -v semodule_package >/dev/null 2>&1; then
@@ -435,6 +430,19 @@ ensure_nvidia_selinux_module() {
     echo "    sudo semodule -i /tmp/vscodium-box-nvidia.pp"
     return 0
   fi
+  # checkmodule requires the policy module name to match the base of the output
+  # .mod filename, so the files must be named vscodium-box-nvidia.{mod,pp}.
+  # Build them in a unique temp DIR so they stay user-owned: fixed paths like
+  # /tmp/vscodium-box-nvidia.mod collide with root-owned leftovers from a
+  # manual sudo run rendering the rule, and a non-root checkmodule or rm then
+  # fails with 'Operation not permitted'. The unique directory suffix keeps
+  # concurrent or repeated runs separate while the file basenames still satisfy
+  # checkmodule's name check. Semver note: this is why the temp file locations
+  # are not the fixed /tmp paths the manual instructions below print.
+  local tmpdir mod pp rc=0
+  tmpdir="$(mktemp -d)"
+  mod="${tmpdir}/vscodium-box-nvidia.mod"
+  pp="${tmpdir}/vscodium-box-nvidia.pp"
   checkmodule -M -m -o "$mod" "$SELINUX_TE" 2>/dev/null || rc=1
   if [ "$rc" -eq 0 ]; then
     semodule_package -o "$pp" -m "$mod" 2>/dev/null || rc=1
@@ -452,7 +460,7 @@ ensure_nvidia_selinux_module() {
   else
     echo "Note: could not compile the NVIDIA SELinux allow rule (checkmodule failed). See $SELINUX_TE."
   fi
-  rm -f "$mod" "$pp"
+  rm -rf "$tmpdir"
 }
 
 create_container() {
