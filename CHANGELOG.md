@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.5.0] - 2026-08-20
+
+### Added
+
+- `provision-container.sh` installs CPU-only image-analysis tools for the `visualize` skill: `tesseract-ocr`, `imagemagick`, `python3-pil`, `python3-numpy`, `python3-opencv`, and `file`, all plain Debian 12 main packages. If they fail to install, the box degrades to exiftool identity only rather than aborting the install.
+
+### Fixed
+
+- VSCodium would not open a window after any new login or X session: `install-vscodium.sh` bound the live Xauthority cookie path (`/run/user/UID/xauth_<random>`, renamed fresh on every session) into the container, so every later `podman start` failed with `getxattr ... no such file or directory` once that cookie was gone. The installer now copies the cookie to a stable path (`$XDG_RUNTIME_DIR/xauth-vscodium`) and mounts that instead, and the generated launchers refresh it from `$XAUTHORITY` before each start.
+- Ollama could not load models with "llama-server binary not found": the release archive's `lib/ollama` tree (the runner plus the CUDA shared objects), which the CLI needs at runtime, was never installed. `provision-container.sh` now copies the whole tree into `/usr/local/lib/ollama` alongside the binary.
+- `~/.ollama` was root-owned after provisioning, so Ollama failed to write its `id_ed25519` key as the box user; `provision-container.sh` now chowns it to the box user.
+- The NVIDIA SELinux allow rule was silently never installed: `checkmodule` requires the output `.mod` filename's base to match the policy module name, and the random `mktemp` names failed that check, so `ensure_nvidia_selinux_module` always reported "could not compile". The temp files are now named after the module, so CUDA/NVML access inside the box is actually granted.
+- `install-vscodium.sh` now re-execs under bash when invoked via `/bin/sh`, which previously rejected the bash-specific array syntax used elsewhere in the script.
+
 ## [5.4.0] - 2026-08-18
 
 ### Added
