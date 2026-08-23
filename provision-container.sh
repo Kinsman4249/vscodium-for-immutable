@@ -885,8 +885,15 @@ if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
   LLAMA_TAG="b10488"
   LLAMA_SHA256="a006ca1a0268a3748686040d1ae021939d92ec0f58f341a30e52056298da4a0b"
   LLAMA_TAR="llama.cpp-${LLAMA_TAG}.tar.gz"
-  if [ -x /usr/local/bin/llama-server ] && [ -x /usr/local/bin/llama-cli ]; then
-    echo "llama.cpp ${LLAMA_TAG} already installed."
+  # Up-to-date marker: the build writes the tag it was compiled from, so a plain
+  # binary-existence check here would keep an OLD build forever (and never
+  # rebuild after a version bump). Only skip the expensive rebuild when the
+  # marker equals the pinned tag; anything else - missing binaries or a
+  # stale/different marker - falls through and rebuilds.
+  LLAMA_MARKER="/usr/local/lib/llama.cpp.version"
+  if [ -x /usr/local/bin/llama-server ] && [ -x /usr/local/bin/llama-cli ] \
+     && [ "$(cat "$LLAMA_MARKER" 2>/dev/null)" = "$LLAMA_TAG" ]; then
+    echo "llama.cpp ${LLAMA_TAG} already installed (up to date) - skipping the build."
   elif [ -x /usr/local/cuda/bin/nvcc ] && command -v cmake >/dev/null 2>&1; then
     echo "Building llama.cpp ${LLAMA_TAG} with CUDA (first build compiles many kernels - be patient)..."
     LLAMA_TMP="$(mktemp -d)"
@@ -910,6 +917,8 @@ if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
             mkdir -p /usr/local/bin
             install -m 0755 "${LLAMA_TMP}/build/bin/llama-cli" /usr/local/bin/llama-cli
             install -m 0755 "${LLAMA_TMP}/build/bin/llama-server" /usr/local/bin/llama-server
+            mkdir -p /usr/local/lib
+            printf '%s\n' "$LLAMA_TAG" > "$LLAMA_MARKER"
             echo "llama.cpp ${LLAMA_TAG} (CUDA) installed."
           else
             echo "WARNING: llama.cpp build failed - see ${LLAMA_TMP}/build.log. llama-cli/llama-server will be unavailable."
@@ -943,6 +952,18 @@ if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
       "$LLM_VENV/bin/pip" install --upgrade pip >/dev/null 2>&1
       "$LLM_VENV/bin/pip" install torch --index-url https://download.pytorch.org/whl/cu128 \
         || echo "WARNING: could not install CUDA torch - the LLM Python runtime will be unavailable."
+    fi
+    # Up-to-date check for vLLM. vLLM is not version-pinned here, so "current"
+    # means it is installed in the venv (a future pin would compare versions
+    # instead). torch is still guarded only by the venv existing, which is what
+    # keeps the huge download to first run. This separate check is the fix that
+    # makes a re-run both fast (torch is never re-fetched for an existing venv)
+    # and correct: a venv that exists but lacks vllm - an interrupted or partial
+    # earlier install, now hidden by the old [ ! -d ] gate - gets vLLM repaired
+    # instead of being silently skipped forever.
+    if "$LLM_VENV/bin/pip" show vllm >/dev/null 2>&1; then
+      echo "vLLM already installed in $LLM_VENV (up to date) - skipping."
+    else
       "$LLM_VENV/bin/pip" install vllm \
         || echo "WARNING: could not install vLLM - it will be unavailable (torch, if installed, still works)."
     fi
