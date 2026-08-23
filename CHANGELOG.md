@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.7.0] - 2026-08-22
+
+### Changed
+
+- `provision-container.sh` now checks each CUDA LLM runtime before installing it and skips the step when it is already up to date, so repeat provision runs are fast instead of redoing the expensive installs. Ollama already skipped when `ollama --version` matched the pinned release; llama.cpp now records the tag it was built from in `/usr/local/lib/llama.cpp.version` and skips the (re)build only when that marker equals the pinned `LLAMA_TAG` (a version bump now triggers a rebuild instead of keeping the old binary); vLLM skips when it is already installed in the `llm-venv` (checked with `pip show vllm`) and is otherwise repaired into an existing venv, instead of the old `[ ! -d $LLM_VENV ]` gate silently skipping a venv that existed but lacked vLLM.
+
+### Fixed
+
+- `vscodium-box` still failed to open a window after any X or session change that rotated the xauth cookie while the box kept running: the container's `Xauthority` mount is a read-only snapshot taken when the container started, so refreshing the host-side cookie never reached the running box and `podman start` was a no-op. The generated launchers now compare the running box's mounted cookie against the refreshed host one and restart the container only when they differ, so a stale cookie picks up the live one instead of surfacing as "Authorization required, but no authorization protocol specified" with no window at all.
+
 ## [5.6.0] - 2026-08-22
 
 ### Added
