@@ -673,9 +673,19 @@ compute_env_args() {
 xauth_refresh_snippet() {
   cat <<'XREF'
 # Refresh the stable X11 Xauthority file so the container mounts a live cookie.
+# A bind-mounted source must EXIST for podman start to succeed at all - podman
+# getxattrs each mount source to relabel it for SELinux, so a missing source
+# aborts the start with a cryptic "getxattr <path>: no such file or directory".
+# /run/user/$UID is tmpfs and is wiped on every login/reboot, so if the live
+# cookie cannot be copied we still create an empty placeholder file; otherwise
+# the box silently fails to boot after any restart. An empty file only denies X
+# auth (the app still starts); the live cookie copy above restores full access.
 if [ -n "${XAUTHORITY:-}" ] && [ -f "$XAUTHORITY" ]; then
-  install -m 0600 "$XAUTHORITY" "${XDG_RUNTIME_DIR:?}/xauth-vscodium" 2>/dev/null || true
+  install -m 0600 "$XAUTHORITY" "${XDG_RUNTIME_DIR:?}/xauth-vscodium" \
+    2>/dev/null || true
 fi
+[ -f "${XDG_RUNTIME_DIR:?}/xauth-vscodium" ] \
+  || { : > "${XDG_RUNTIME_DIR:?}/xauth-vscodium"; chmod 0600 "${XDG_RUNTIME_DIR:?}/xauth-vscodium"; }
 XREF
 }
 
