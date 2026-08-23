@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.6.0] - 2026-08-22
+
 ### Added
 
 - `install-vscodium.sh` gains a `--network MODE` flag (creation-only) that passes a podman network mode to `podman create`. Default container networking defaults to pasta on a netavark rootless backend, which is silently offline on some immutable hosts - the box starts without a route and apt fails with "Temporary failure resolving". On those hosts `--network slirp4netns` restores working networking (verified: DNS + HTTP egress, and full package/CUDA provisioning completes).
+
+### Fixed
+
+- `vscodium-box` could stop booting after any restart that cleared the tmpfs stable-xauth file. `/run/user/$UID` is wiped on every login/reboot, so once `/run/user/$UID/xauth-vscodium` was gone `podman start` aborted with `getxattr ... no such file or directory`, and the generated launchers' silent `|| true` on the cookie copy meant nothing recreated it in a session whose `$XAUTHORITY` was unset or stale. `xauth_refresh_snippet` now guarantees a source file exists before every start: it still copies the live cookie when present, and otherwise writes an empty placeholder, so podman's mount-source relabel always has a file and the box boots even in a degraded session (an empty cookie only denies X auth, not the app starting).
 
 ## [5.5.1] - 2026-08-20
 
