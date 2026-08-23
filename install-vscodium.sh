@@ -689,6 +689,35 @@ fi
 XREF
 }
 
+# Emits the statement that brings the container up with a LIVE xauth cookie.
+# xauth_refresh_snippet only fixes the host-side file: the container's
+# Xauthority mount is a read-only snapshot taken when the container last
+# STARTED, so on an already-running box podman start is a no-op and the stale
+# cookie stays mounted - which surfaces as Electron's "Authorization required,
+# but no authorization protocol specified" and no window at all. Compare the
+# running box's mounted cookie to the freshly refreshed host one, and restart
+# the box only when they differ (a restart re-mounts and re-labels); a plain
+# start suffices for a stopped box or one already in sync. Spliced verbatim
+# into write_launcher and write_console_launcher, right after
+# xauth_refresh_snippet.
+start_or_restart_snippet() {
+  cat <<'SOR'
+# If the running box's mounted cookie no longer matches the refreshed host
+# cookie, restart it so the mount snapshot picks up the live one; only when the
+# box is stopped or already in sync is a plain start enough.
+STABLE="${XDG_RUNTIME_DIR:?}/xauth-vscodium"
+X_DEST="$(podman inspect ${CONTAINER_NAME} --format '{{range .Mounts}}{{if eq .Source "'${STABLE}'"}}{{.Destination}}{{end}}{{end}}' 2>/dev/null)"
+HOST_HASH="$(md5sum "$STABLE" 2>/dev/null | cut -d' ' -f1)"
+BOX_HASH="$(podman exec ${CONTAINER_NAME} md5sum "$X_DEST" 2>/dev/null | cut -d' ' -f1)"
+if [ "$(podman inspect ${CONTAINER_NAME} --format '{{.State.Running}}' 2>/dev/null)" = "true" ] \
+   && [ -n "$BOX_HASH" ] && [ "$BOX_HASH" != "$HOST_HASH" ]; then
+  podman restart ${CONTAINER_NAME} >/dev/null
+else
+  podman start ${CONTAINER_NAME} >/dev/null
+fi
+SOR
+}
+
 # Replaces what distrobox-export used to do. Generating the launcher and the
 # .desktop entry outright is simpler than patching whatever a tool emitted, and
 # both files now live somewhere the container cannot write to.
@@ -718,7 +747,7 @@ write_launcher() {
 # VSCodium inside it.
 set -euo pipefail
 $(xauth_refresh_snippet)
-podman start ${CONTAINER_NAME} >/dev/null
+$(start_or_restart_snippet)
 exec podman exec --interactive${env_args} ${CONTAINER_NAME} \\
   /usr/bin/codium ${gpu_flags} "\$@"
 WRAPPER_EOF
@@ -788,7 +817,7 @@ write_console_launcher() {
 # into a login shell inside it - no VSCodium.
 set -euo pipefail
 $(xauth_refresh_snippet)
-podman start ${CONTAINER_NAME} >/dev/null
+$(start_or_restart_snippet)
 exec podman exec --interactive --tty${env_args} ${CONTAINER_NAME} /bin/bash -l
 WRAPPER_EOF
   chmod 0755 "$WRAPPER_CONSOLE"
