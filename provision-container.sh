@@ -882,8 +882,8 @@ if [ "${BOX_WITH_CUDA:-0}" = "1" ] && [ "${BOX_WITH_LLM:-0}" = "1" ]; then
   # TO BUMP: bump LLAMA_TAG, download
   #   https://github.com/ggml-org/llama.cpp/archive/refs/tags/<TAG>.tar.gz
   # and compute its sha256sum.
-  LLAMA_TAG="b10488"
-  LLAMA_SHA256="a006ca1a0268a3748686040d1ae021939d92ec0f58f341a30e52056298da4a0b"
+  LLAMA_TAG="b10599"
+  LLAMA_SHA256="65b6187a3af75c86d3a365c30a4c11bad9cefc8df583f67b73edbd94f1abdf49"
   LLAMA_TAR="llama.cpp-${LLAMA_TAG}.tar.gz"
   # Up-to-date marker: the build writes the tag it was compiled from, so a plain
   # binary-existence check here would keep an OLD build forever (and never
