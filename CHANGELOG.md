@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.7.1] - 2026-08-23
+
+### Changed
+
+- Bumped the pinned llama.cpp build from `b10488` to `b10599` in `provision-container.sh`, converging the provisioner's `LLAMA_TAG` toward the version the model profiles were benchmarked on (the active profiles rode `b10599-4-gc060ca974`, build 10603, whose tag lineage is `b10599`; the old `b10488` pin was several tags stale). The `LLAMA_SHA256` was recomputed from the corresponding source tarball. This ships on the next container rebuild - the running box keeps its harness-built `$HOME/llama.cpp/build` binary until then.
+
 ## [5.7.0] - 2026-08-22
 
 ### Changed
