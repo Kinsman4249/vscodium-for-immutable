@@ -104,7 +104,7 @@ set -euo pipefail
 
 # Bump this whenever the script's install logic changes. Only shown in --debug
 # output, so you can tell which version produced a given log.
-BUILD="2026.08.16-3"
+BUILD="2026.11.14-1"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
@@ -291,6 +291,15 @@ require_podman() {
   if [ -f /run/.containerenv ] || [ -f /.dockerenv ] || [ -n "${container:-}" ]; then
     die "this looks like it's running inside a container. Run it from a host terminal instead."
   fi
+  # Everything here is rootless podman: the container runs as this uid, the
+  # launchers land in $HOME, and only the optional NVIDIA SELinux rule ever
+  # touches sudo (best-effort, non-fatal). Run as root instead and $HOME is
+  # /root, the container ends up rootful in /var/lib/containers where the
+  # desktop-user launchers cannot start it, and the repos-dir check dies with
+  # the confusing "repos dir must live under /root" - so refuse early, with
+  # the reason.
+  [ "$(id -u)" -eq 0 ] \
+    && die "run this as your desktop user, not with sudo or as root - the installer uses rootless podman. The only command it needs sudo for is the optional NVIDIA SELinux rule, which it attempts non-interactively and which never fails the install."
   command -v podman >/dev/null 2>&1 \
     || die "podman is not installed or not on PATH. See https://podman.io/docs/installation"
   [ -f "$PROVISION_SCRIPT" ] \
@@ -616,9 +625,36 @@ create_container() {
   podman create "${create_args[@]}" "$IMAGE" sleep infinity >/dev/null
 }
 
+# Starts the container, transparently fixing the one start-time failure that a
+# podman upgrade can introduce. Newer podman removed slirp4netns support, and a
+# container whose network mode an older podman recorded as slirp4netns (this
+# project's own --network slirp4netns fallback for hosts with a broken pasta
+# default, or simply an older default) refuses to start with "slirp4netns
+# support has been removed, run `podman system migrate`". Migrate rewrites the
+# stored config to the current backend (pasta) - once, then plain starts work
+# again.
+start_container() {
+  local out rc=0
+  out="$(podman start "$CONTAINER_NAME" 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  case "$out" in
+    *slirp4netns*)
+      echo "Note: this container's network was recorded by an older podman (slirp4netns), which the current podman no longer supports."
+      echo "  Running 'podman system migrate' to update it to the current backend (pasta) - a one-time fix."
+      podman system migrate || die "podman system migrate failed - the container cannot start. See the podman error above."
+      podman start "$CONTAINER_NAME" >/dev/null
+      ;;
+    *)
+      die "$out"
+      ;;
+  esac
+}
+
 provision_container() {
   echo "Provisioning the container (this is the slow part on a first run)..."
-  podman start "$CONTAINER_NAME" >/dev/null
+  start_container
   podman exec --interactive --user root \
     --env "BOX_USER=$(id -un)" \
     --env "BOX_UID=$(id -u)" \

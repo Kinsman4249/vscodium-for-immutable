@@ -381,6 +381,15 @@ to also update Claude Code - it isn't remembered between runs, unlike
 themselves, so a re-run is how they move forward. actionlint is skipped on a
 re-run if the pinned version is already installed, so repeat runs stay cheap.
 
+Run the installer as your desktop user, **not** via `sudo` - it is rootless
+podman end to end, and the only command that may need sudo (the optional
+NVIDIA SELinux rule) is attempted non-interactively and never fails the
+install. It also handles the one update-time breakage a podman upgrade can
+introduce: if the box was created by an older podman that recorded
+slirp4netns networking, the current podman refuses to start it until
+`podman system migrate` rewrites its config - the installer now detects that
+error and runs the migration for you.
+
 ### Migrating from the Distrobox versions
 
 If you still have the old Distrobox `vscodium-box`, the installer stops and
