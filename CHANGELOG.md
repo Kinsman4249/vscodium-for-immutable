@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.7.2] - 2026-11-14
+
+### Fixed
+
+- `install-vscodium.sh` could no longer update the box after a Bazzite/Fedora update that shipped a podman without slirp4netns: the container's network mode (recorded as slirp4netns by an older podman, either via the script's own `--network slirp4netns` fallback or the older default) made `podman start` fail with "slirp4netns support has been removed", aborting the provisioning step. The installer now detects that exact error and runs `podman system migrate` once to rewrite the stored config to the current backend (pasta) before retrying the start.
+- Running the installer with `sudo` produced a confusing "repos dir must live under /root" error, because the script keys everything off `$HOME`. It now refuses to run as root outright, explaining that the installer is rootless-only (a root run would create a rootful container in `/var/lib/containers` that the desktop-user launchers cannot start) and that the only command needing sudo - the optional NVIDIA SELinux rule - is attempted non-interactively and never fails the install.
+
 ## [5.7.1] - 2026-08-23
 
 ### Changed
