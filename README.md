@@ -516,23 +516,37 @@ GPU-less machine is unchanged.
 
 The bind mounts are marked `,z`, which makes podman relabel mounted files for
 SELinux - from `user_home_t` on the host to `container_file_t` the container
-can read. That relabel runs at **mount time**, not at file-in-place time. So a
-file you create on the host *after* the container was started (a repo you
-`git clone`, a file you drag into the mounted folder) keeps its host label,
-and the container process (`container_t`) is denied reading or even `stat`-ing
-it until the container is restarted and podman relabels the mount again.
+can read. That relabel runs at **mount time**, not at file-in-place time. A
+file you *create* fresh inside an already-relabeled folder inherits
+`container_file_t` from its parent automatically, so new files are fine. The
+case that trips the box is a file *moved* in from elsewhere - dragged out of
+`~/Downloads`, restored from a backup, or copied from a directory that was
+never relabeled. A move carries the file's old label with it, and the
+container process (`container_t`) is denied reading or even `stat`-ing it
+until something relabels it.
 
 That is what you're hitting when the box says `Permission denied` on a file you
 just dropped into a mounted folder: the file *is* there, its SELinux label just
 says it isn't for the container.
 
-The **vscodium-box Restart** app-grid entry exists for exactly this: it stops
-and starts the container, re-running the `,z` relabel so host-created files
-become readable inside. The container runs `sleep infinity`, so this is quick
-and only re-relabels - it does not reinstall anything. The trade-off is that it
-also terminates the running VSCodium (and any shell session in the box), which
-is why it is an explicit app-grid action rather than something the editor
-triggers on its own.
+Two ways to fix it. The **vscodium-box Restart** app-grid entry exists for
+exactly this: it stops and starts the container, re-running the `,z` relabel so
+host-created files become readable inside. The container runs `sleep infinity`,
+so this is quick and only re-relabels - it does not reinstall anything. The
+trade-off is that it also terminates the running VSCodium (and any shell
+session in the box), which is why it is an explicit app-grid action rather than
+something the editor triggers on its own.
+
+If you'd rather not lose the editor session, relabel the file (or folder) in
+place instead. `podman unshare` runs the command in the same user namespace
+podman uses for its containers, where your uid is root - enough for `chcon` to
+relabel files you own, with no sudo:
+
+    podman unshare chcon -t container_file_t path/to/file     # one file
+    podman unshare chcon -Rt container_file_t path/to/dir     # a whole folder
+
+A file relabeled this way is readable inside the running box immediately - no
+restart, no killed editor.
 
 ## Syncing a runpod-helper pod into Kilo Code and opencode
 

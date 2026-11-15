@@ -104,7 +104,7 @@ set -euo pipefail
 
 # Bump this whenever the script's install logic changes. Only shown in --debug
 # output, so you can tell which version produced a given log.
-BUILD="2026.11.14-1"
+BUILD="2026.11.14-2"
 
 CONTAINER_NAME="vscodium-box"
 IMAGE="debian:12"
@@ -744,7 +744,14 @@ start_or_restart_snippet() {
 STABLE="${XDG_RUNTIME_DIR:?}/xauth-vscodium"
 X_DEST="$(podman inspect ${CONTAINER_NAME} --format '{{range .Mounts}}{{if eq .Source "'${STABLE}'"}}{{.Destination}}{{end}}{{end}}' 2>/dev/null)"
 HOST_HASH="$(md5sum "$STABLE" 2>/dev/null | cut -d' ' -f1)"
-BOX_HASH="$(podman exec ${CONTAINER_NAME} md5sum "$X_DEST" 2>/dev/null | cut -d' ' -f1)"
+# The exec below can only compare cookies when the box is RUNNING; on a
+# stopped box it fails, and under the launcher's 'set -euo pipefail' an
+# unguarded failure would kill the script before the 'podman start' fallback
+# below ever ran - the launcher's whole point. '|| true' turns that into an
+# empty BOX_HASH, which the guard in the if below treats as "no restart
+# needed", so a stopped box falls through to a plain start. This was the
+# second half of the "click the icon, nothing happens" failure.
+BOX_HASH="$(podman exec ${CONTAINER_NAME} md5sum "$X_DEST" 2>/dev/null | cut -d' ' -f1 || true)"
 if [ "$(podman inspect ${CONTAINER_NAME} --format '{{.State.Running}}' 2>/dev/null)" = "true" ] \
    && [ -n "$BOX_HASH" ] && [ "$BOX_HASH" != "$HOST_HASH" ]; then
   podman restart ${CONTAINER_NAME} >/dev/null
@@ -782,6 +789,13 @@ write_launcher() {
 # the next run. Starts the ${CONTAINER_NAME} container if needed, then runs
 # VSCodium inside it.
 set -euo pipefail
+# The snippets spliced in below are written with QUOTED heredocs on purpose -
+# their \$vars must survive into this generated script - so they cannot expand
+# \${CONTAINER_NAME} at generation time the way this heredoc does. Define it
+# here as a launcher-local constant, or this script dies under 'set -u' with
+# 'CONTAINER_NAME: unbound variable' on its first podman call, which is exactly
+# the "click the icon, the box never boots" failure.
+CONTAINER_NAME="${CONTAINER_NAME}"
 $(xauth_refresh_snippet)
 $(start_or_restart_snippet)
 exec podman exec --interactive${env_args} ${CONTAINER_NAME} \\
@@ -852,6 +866,8 @@ write_console_launcher() {
 # the next run. Starts the ${CONTAINER_NAME} container if needed, then drops
 # into a login shell inside it - no VSCodium.
 set -euo pipefail
+# Same launcher-local constant as in write_launcher - see the comment there.
+CONTAINER_NAME="${CONTAINER_NAME}"
 $(xauth_refresh_snippet)
 $(start_or_restart_snippet)
 exec podman exec --interactive --tty${env_args} ${CONTAINER_NAME} /bin/bash -l
