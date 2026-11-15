@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.7.3] - 2026-11-14
+
+### Fixed
+
+- The generated launchers (`vscodium-box`, `vscodium-box-console`) could not boot the box at all after a podman/Bazzite update: `start_or_restart_snippet` is emitted from a quoted heredoc, so the `${CONTAINER_NAME}` it referenced was written into the launcher literally while the launcher never defined the variable, and the `set -u` at the top of every generated script made the first `podman inspect` call exit with "CONTAINER_NAME: unbound variable" - before `podman start` ever ran, so clicking the app-grid entry did nothing even after `podman system migrate` fixed the underlying start error. The launchers now define the container name as a local constant, and the snippet's xauth cookie comparison is guarded against a stopped box (the `podman exec` hash check failed under `set -e` before the `podman start` fallback could run). A launcher now starts the box from a fully stopped state.
+- The README's "Fixing Permission denied inside the box" section now documents that the stale-label problem is files *moved* in from elsewhere (a move carries the source's `user_home_t` label, while files created fresh in the relabeled tree inherit `container_file_t`), and that `podman unshare chcon -t container_file_t <path>` relabels a moved file in place - no restart, no sudo, no killed editor - alongside the existing `vscodium-box Restart` app-grid entry.
+
 ## [5.7.2] - 2026-11-14
 
 ### Fixed
